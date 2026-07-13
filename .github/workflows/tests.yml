@@ -14,6 +14,7 @@ jobs:
   js:
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false # a failure on one Node version must not cancel the other's signal
       matrix:
         node: [18, 22] # 18 = the engines floor, 22 = current
     steps:

@@ -448,12 +448,18 @@ test('page.on delivers console events to the subscriber', async () => {
     const page = await openPage(port);
     const got = [];
     const off = page.on('console', (ev) => got.push(ev));
+    // Await delivery instead of sleeping a fixed 30ms — TCP delivery on a slow
+    // CI runner can take longer, and a '*' waiter resolves exactly when the
+    // LAST pushed frame has arrived (frames are ordered on one socket), so
+    // everything before it has demonstrably been dispatched to listeners.
+    let arrived = page.waitForEvent('*', (ev) => ev.t === 2, { timeout: 5000 });
     pushSink({ kind: 'console', t: 1, data: { level: 'warn', args: ['hi'] } });
     pushSink({ kind: 'net', t: 2, data: { url: '/x' } }); // wrong kind, must be ignored
-    await new Promise((r) => setTimeout(r, 30));
+    await arrived;
     off();
+    arrived = page.waitForEvent('console', (ev) => ev.t === 3, { timeout: 5000 });
     pushSink({ kind: 'console', t: 3, data: { level: 'log', args: ['after-off'] } });
-    await new Promise((r) => setTimeout(r, 30));
+    await arrived; // a live waiter sees it — only the unsubscribed `off` handler must not
     assert.equal(got.length, 1, 'only the console event, and not after unsubscribe');
     assert.equal(got[0].data.args[0], 'hi');
     page.close();

@@ -278,7 +278,10 @@ TEST_CASE ("WebAgentBridge shot returns the path, surfaces errors, and threads t
     const auto ok = recvReply (*c, 3000);
     REQUIRE ((bool) ok.getProperty ("ok", false));
     REQUIRE ((int) ok.getProperty ("id", -1) == 30);
-    REQUIRE (ok.getProperty ("path", juce::var()).toString() == "/tmp/wab_ok.png");
+    // The server replies with juce::File(path).getFullPathName(), which is
+    // platform-normalized ("/tmp/x" becomes "D:\\tmp\\x" on Windows) — compare
+    // through the same transformation instead of the raw wire string.
+    REQUIRE (ok.getProperty ("path", juce::var()).toString() == juce::File ("/tmp/wab_ok.png").getFullPathName());
     REQUIRE (lastCrop->isEmpty());
 
     // With a rect -> threaded through to the capturer verbatim.
