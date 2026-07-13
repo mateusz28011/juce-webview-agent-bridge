@@ -51,6 +51,28 @@ The bridge itself is transport-level portable (plain TCP + `evaluateJavascript`,
 which JUCE backs with WKWebView/WebView2/WebKitGTK), but only the macOS column has
 seen real use. Reports and fixes for the other columns are very welcome.
 
+## Where this comes from (case study)
+
+The module was extracted from **Better Message Mycelia** — a JUCE MIDI sequencer
+plugin with a dense React + PixiJS/WebGL WebView UI (16 generative voices, piano
+rolls, modulation matrix). There it earns its keep daily, in three roles:
+
+- **Agent-driven debugging** — a coding agent (Claude Code, via the bundled skill)
+  drives the *live* plugin: reads real engine state over `backend()`, clicks through
+  the actual UI, and verifies fixes with WebGL-true screenshots — no dev-server
+  copy, no mocked bridge.
+- **Live e2e suites** — `node:test` suites drive real knobs (mouse-drag synthesis
+  through the widgets' own handlers), piano-roll pointer gestures, preset loads,
+  and MIDI injection, asserting on both the DOM and the C++ engine.
+- **Performance forensics** — the render-perf probe and the console/network stream
+  pinned down real production bugs that were invisible from the outside: an LFO
+  playhead stutter (rAF frame-gap percentiles), a dead 60 Hz push-timer whose only
+  symptom was a misleading "preset timeout" toast (event-pump aliveness probing),
+  and a ~40 ms per-click hitch traced to a single inherited-CSS style write
+  (per-scenario jank isolation, described in the skill).
+
+Every "battle-tested" claim in the Status table above means exactly this usage.
+
 ## Install
 
 It's a standard JUCE module. Get the repo — as a submodule:
