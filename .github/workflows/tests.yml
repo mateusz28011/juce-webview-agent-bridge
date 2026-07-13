@@ -1,0 +1,75 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Zero-dependency Node suites (client, page helpers, capture script).
+  js:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node: [18, 22] # 18 = the engines floor, 22 = current
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - run: npm test
+
+  # C++ bridge suite against a real loopback server. macOS is the battle-tested
+  # platform (see README "Status") and gates the build; Windows/Linux compile+run
+  # the same suite but are non-blocking until that column is verified for real.
+  cpp:
+    name: cpp (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.experimental }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            experimental: false
+          - os: windows-latest
+            experimental: true
+          - os: ubuntu-latest
+            experimental: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install JUCE Linux deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libasound2-dev libx11-dev libxext-dev libxrandr-dev libxinerama-dev \
+            libxcursor-dev libfreetype6-dev libfontconfig1-dev libgtk-3-dev \
+            libwebkit2gtk-4.1-dev pkg-config ninja-build xvfb
+
+      # JUCE + Catch2 are FetchContent'd on first configure — cache the sources
+      # so re-runs skip the ~200MB JUCE clone.
+      - name: Cache FetchContent deps
+        uses: actions/cache@v4
+        with:
+          path: build/test/_deps
+          key: deps-${{ runner.os }}-${{ hashFiles('tests/CMakeLists.txt') }}
+
+      - name: Configure
+        run: cmake -S tests -B build/test -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build/test --config Release --parallel 4
+
+      - name: Test (Linux, headless)
+        if: runner.os == 'Linux'
+        run: xvfb-run -a ctest --test-dir build/test -C Release --output-on-failure
+
+      - name: Test
+        if: runner.os != 'Linux'
+        run: ctest --test-dir build/test -C Release --output-on-failure

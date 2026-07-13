@@ -1,0 +1,26 @@
+{
+  "name": "web-agent-bridge-client",
+  "version": "0.1.0",
+  "description": "CLI + protocol client for the juce_webview_agent_bridge debug WebView bridge (eval/console/network/click/fill/screenshot over a loopback socket, no CDP).",
+  "type": "module",
+  "bin": {
+    "web-agent": "tools/web-agent.mjs"
+  },
+  "scripts": {
+    "test": "node --test tests/*.test.mjs",
+    "release": "bash scripts/release.sh"
+  },
+  "files": [
+    "tools/",
+    "README.md",
+    "LICENSE"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mateusz28011/juce-webview-agent-bridge.git"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
