@@ -53,6 +53,24 @@ What that looks like in practice, daily, in the same project:
   dead 60 Hz push-timer masquerading as a "preset timeout" toast, and a ~40 ms
   per-click hitch traced to one inherited-CSS style write.
 
+### Why not just Playwright?
+
+Because Playwright can't attach to a shipping app's embedded WebView. Its only
+attach paths are an opt-in WebView2 CDP endpoint (Windows, Debug-only, off by
+default) and its own bundled browsers — it has **no** path to a WKWebView, which
+exposes no CDP at all. So for a JUCE app that didn't build in remote debugging,
+Playwright has nowhere to connect. This bridge rides the `evaluateJavascript` +
+native-function surface JUCE already provides, so it works on both — and it does
+two things no browser-automation tool can: **screenshot GPU-composited WebGL**
+(in-WebView snapshots render it black) and **assert on real native C++ state**
+(`backend()`), not just the DOM.
+
+It is **not** a Playwright replacement: Playwright wins on trusted input
+(`isTrusted=true`), network interception/mocking, multiple engines, and multi-page.
+The bridge's input is synthetic and its network is observe-only. Different jobs —
+and you can even keep Playwright's *test harness* while driving through the bridge,
+see [`examples/playwright-test`](examples/playwright-test).
+
 ## Status — what's actually been exercised
 
 Honest test coverage, so you know what you're getting:
@@ -188,6 +206,11 @@ request interception, single page, and the app must be launched first. What you
 get that no CDP stack can offer on an embedded WebView: the *real* native bridge
 and engine state in your assertions (`backend()` / `expect.poll`), the live
 console/network stream (`waitForResponse`), and WebGL-true screenshots.
+
+Prefer the `@playwright/test` runner (its reporter, retries, parallel workers)?
+Keep it as the *harness* and drive through the bridge — a ready-to-copy fixture is
+in [`examples/playwright-test`](examples/playwright-test). It adds no dependency to
+this module.
 
 - **Selectors:** `css` (default), `text=<exact text>`, `role=<role>[name="<accessible name>"]`.
 - **Page:** `locator`, `getByTestId`, `evaluate(code)`, `readBig(expr)` (chunked read for

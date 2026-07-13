@@ -2,3 +2,8 @@ build/
 node_modules/
 .omc/
 .DS_Store
+
+# @playwright/test harness artifacts (examples/playwright-test)
+test-results/
+playwright-report/
+package-lock.json
