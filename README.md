@@ -30,12 +30,28 @@ already provides. Fair warning: only the macOS column is battle-tested today —
 > gated to `JUCE_DEBUG` by default (`WEB_AGENT_BRIDGE_ENABLED`). **Never ship it
 > enabled in a release build.**
 
-## Requirements
+## Why
 
-- **Host:** JUCE 8 (tested with 8.0.x), C++17, a `juce::WebBrowserComponent`-based UI.
-- **Platforms:** macOS (WKWebView) and Windows (WebView2) for eval/console/network/DOM;
-  the native screenshot is macOS 14+ only for now.
-- **CLI / e2e client:** Node ≥ 18, zero npm dependencies.
+This module exists because of one problem: **a heavy WebView UI you can't see
+into.** Its home project — *Better Message Mycelia*, a JUCE MIDI sequencer with a
+dense React + PixiJS/WebGL plugin UI — needed optimizing, and an AI coding agent
+can't optimize what it can't observe: no CDP, WebGL renders black in snapshots,
+and a dev-server copy in a browser lies about native state and timing. The bridge
+turned the *running plugin* into something an agent can read, drive, and measure —
+and that unlocked AI for the hard part of the work. The same plumbing then turned
+out to be exactly what live e2e tests need.
+
+What that looks like in practice, daily, in the same project:
+
+- **Agent debugging** — Claude Code (via the bundled skill) reads real engine state
+  over `backend()`, clicks the actual UI, and verifies fixes with WebGL-true
+  screenshots.
+- **Live e2e suites** — `node:test` drives real knobs, piano-roll gestures, preset
+  loads and MIDI injection, asserting on the DOM *and* the C++ engine.
+- **Performance forensics** — the render-perf probe and event stream pinned real
+  bugs invisible from outside: an LFO playhead stutter (rAF gap percentiles), a
+  dead 60 Hz push-timer masquerading as a "preset timeout" toast, and a ~40 ms
+  per-click hitch traced to one inherited-CSS style write.
 
 ## Status — what's actually been exercised
 
@@ -51,29 +67,10 @@ The bridge itself is transport-level portable (plain TCP + `evaluateJavascript`,
 which JUCE backs with WKWebView/WebView2/WebKitGTK), but only the macOS column has
 seen real use. Reports and fixes for the other columns are very welcome.
 
-## Where this comes from (case study)
-
-The module was extracted from **Better Message Mycelia** — a JUCE MIDI sequencer
-plugin with a dense React + PixiJS/WebGL WebView UI (16 generative voices, piano
-rolls, modulation matrix). There it earns its keep daily, in three roles:
-
-- **Agent-driven debugging** — a coding agent (Claude Code, via the bundled skill)
-  drives the *live* plugin: reads real engine state over `backend()`, clicks through
-  the actual UI, and verifies fixes with WebGL-true screenshots — no dev-server
-  copy, no mocked bridge.
-- **Live e2e suites** — `node:test` suites drive real knobs (mouse-drag synthesis
-  through the widgets' own handlers), piano-roll pointer gestures, preset loads,
-  and MIDI injection, asserting on both the DOM and the C++ engine.
-- **Performance forensics** — the render-perf probe and the console/network stream
-  pinned down real production bugs that were invisible from the outside: an LFO
-  playhead stutter (rAF frame-gap percentiles), a dead 60 Hz push-timer whose only
-  symptom was a misleading "preset timeout" toast (event-pump aliveness probing),
-  and a ~40 ms per-click hitch traced to a single inherited-CSS style write
-  (per-scenario jank isolation, described in the skill).
-
-Every "battle-tested" claim in the Status table above means exactly this usage.
-
 ## Install
+
+**Requirements:** JUCE 8, C++17, a `juce::WebBrowserComponent`-based UI; the
+clients need Node ≥ 18 (zero npm dependencies).
 
 It's a standard JUCE module. Get the repo — as a submodule:
 
@@ -221,42 +218,13 @@ backgrounded-host handling — are in [docs/e2e.md](docs/e2e.md).
 
 ## Discovery & auth
 
-On `start()` the host binds `127.0.0.1:8930` (scanning up to 8 ports on collision) and
-writes the chosen `{port, token}` to **`~/.web_agent_bridge.json`** (deleted on
-stop), `0600` so the plaintext token stays owner-only. It also registers a
-per-instance file **`~/.web_agent_bridge.d/<port>.json`**, so several hosts (e.g.
-multiple plugin instances in a DAW) don't clobber each other's `{port, token}` in the
-single legacy file. The client enumerates that directory and picks the requested
-`--port` (or the lowest), falling back to the legacy file for an older single-instance
-host. The client reads it automatically — no need to know the port. A random **session token** is required: a
-connection must present it (in any message, e.g. `{"op":"auth","token":"…"}`) before
-any op runs or before it receives the sink stream. The bundled client handles this
-transparently. (If the host can't write the discovery file, it fails open and disables
-the token.)
-
-## Protocol
-
-Newline-delimited JSON over TCP. Requests carry an `id`; replies echo it. Every request
-also carries `token` until the connection is authenticated.
-
-| Request | Reply |
-|---|---|
-| `{"op":"auth","token":"…"}` | `{"op":"auth","ok":bool,"error"?}` |
-| `{"id","op":"eval","code":"…"}` | `{"id","op":"eval","ok":bool,"result"?,"error"?}` |
-| `{"id","op":"shot","path"?,"rect"?}` | `{"id","op":"shot","ok",path,"error"?}` (PNG written by the host; `rect`={x,y,w,h} CSS px crops to a region) |
-| `{"id","op":"bounds"}` | `{"id","op":"bounds","ok",x,y,w,h}` (screen coords) |
-| `{"id","op":"ping"}` | `{"id","op":"ping","ok":true}` |
-| `{"id","op":"hello"}` | `{"id","op":"hello","ok",protocolVersion,ops[],platform,screenshotAvailable,authRequired}` |
-| `{"id","op":"sink_replay","since"?}` | re-sends buffered `sink` frames with `seq` > `since`, then `{"id","op":"sink_replay","ok",count}` |
-
-Unsolicited stream events: `{"op":"sink","seq":N,"event":{kind:"console"|"error"|"net", t, data}}`.
-`seq` is a monotonic per-host counter — clients dedup by it and detect gaps; a freshly
-connected client can `sink_replay` (since a seq) to catch up on the **same** socket
-instead of racing a page-backlog read against opening the stream.
-For `net`, `data.kind` is one of `fetch` / `xhr` / `ws` / `sse` / `beacon` / `timing`;
-request/response bodies + headers (and WS/SSE frame bodies) are only included while
-response-body capture is armed (`capture on`). Sink events are broadcast from a
-dedicated writer thread (never the message/GUI thread).
+On `start()` the host binds `127.0.0.1:8930` (scanning upward on collision) and
+publishes `{port, token}` to `~/.web_agent_bridge.json` (plus a per-instance file
+under `~/.web_agent_bridge.d/` so several hosts coexist). Clients read it
+automatically; a random per-session **token** gates every connection. The wire is
+newline-delimited JSON over TCP (`hello` / `ping` / `auth` / `eval` / `bounds` /
+`shot` / `sink_replay` + the unsolicited `sink` event stream) — the full op table,
+sink-frame format, and discovery details are in [docs/protocol.md](docs/protocol.md).
 
 ## Known limits
 
@@ -265,49 +233,18 @@ dedicated writer thread (never the message/GUI thread).
   WebGL/canvas is included — unlike `WKWebView.takeSnapshot`, which returns black
   for hardware-accelerated content ([WebKit #198107](https://bugs.webkit.org/show_bug.cgi?id=198107)).
   The **host app** needs Screen Recording permission (one-time TCC prompt on first
-  `shot`). A `rect` (CSS px) crops to a UI region host-side — the host owns the
-  geometry (scale, title bar, clamp), so the client just passes an element's
-  `getBoundingClientRect()`. **Windows / Linux capture (incl. crop) is a TODO**
-  (`Windows.Graphics.Capture` of the HWND / XComposite). The `bounds` op remains
-  available for client-side capture fallbacks.
+  `shot`) — and on Debug builds the grant is keyed to your code signature, so an
+  ad-hoc-signed app loses it on every rebuild; the fix (a stable self-signed
+  identity) and the `-3801` error explained:
+  [docs/screen-recording.md](docs/screen-recording.md). A `rect` (CSS px) crops to
+  a UI region host-side — the host owns the geometry (scale, title bar, clamp), so
+  the client just passes an element's `getBoundingClientRect()`. **Windows / Linux
+  capture (incl. crop) is a TODO** (`Windows.Graphics.Capture` of the HWND /
+  XComposite). The `bounds` op remains available for client-side capture fallbacks.
 - **Synthetic input** dispatched from JS has `isTrusted === false`, so APIs gated
   behind a user gesture (file pickers, some clipboard/fullscreen) are out of reach.
 - **eval errors** are only reported on WKWebView; on WebView2 a failed eval looks
   like a `null` result — rely on the console/error stream there.
-
-## macOS Screen Recording permission (and why a stable signature matters)
-
-The native `shot` capture needs the **host app** to hold **Screen Recording**
-permission (System Settings → Privacy & Security → Screen Recording). If it
-doesn't, the host reports the real reason, e.g.:
-
-```
-SCShareableContent failed: The user declined TCCs … code -3801
-```
-
-`-3801` is a permission denial, **not** a bug in the capture code.
-
-The trap: macOS keys the grant to the app's **code signature**. An **ad-hoc**
-signature (the default for local/Debug builds) gets a *fresh cdhash on every
-rebuild*, so the grant evaporates and you're back to `-3801` after each build —
-even though you "already allowed it". Fix it by signing the Standalone with a
-**stable** self-signed identity so the designated requirement stays constant:
-
-```bash
-# 1. once: make a self-signed Code Signing cert in the login keychain
-#    (Keychain Access → Certificate Assistant → Create a Certificate →
-#     Self-Signed Root, type "Code Signing"), e.g. named "My Local Codesign".
-# 2. re-sign the built app with it (e.g. a POST_BUILD codesign step in your CMake):
-codesign --force --deep --sign "My Local Codesign" MyApp.app
-# 3. clear any stale grant, then approve once in System Settings:
-tccutil reset ScreenCapture com.example.myapp
-```
-
-After approving once, the grant **survives rebuilds** (same cert → same
-designated requirement). SCK reads the permission at launch, so **relaunch the
-app** after granting. Note `security find-identity -p codesigning` may show the
-self-signed cert as not-a-valid-identity (it isn't *trusted*), yet `codesign`
-signs with it fine — that's expected.
 
 ## Testing
 
