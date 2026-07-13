@@ -40,9 +40,9 @@ Honest test coverage, so you know what you're getting:
 
 | Area | macOS (WKWebView) | Windows (WebView2) | Linux |
 |---|---|---|---|
-| eval / console / network / DOM / e2e | ✅ used daily against a real plugin | ⚠️ written for it, **untested** | ❌ untested |
+| eval / console / network / DOM / e2e | ✅ used daily against a real plugin | ⚠️ written for it, untested against a real app | ⚠️ untested against a real app |
 | Native screenshot (`shot`) | ✅ (macOS 14+, ScreenCaptureKit) | ❌ TODO (`Windows.Graphics.Capture`) | ❌ TODO |
-| C++ + JS test suites | ✅ | ⚠️ should pass (portable code), unverified | ⚠️ unverified |
+| C++ + JS test suites | ✅ CI | ✅ CI | ✅ CI |
 
 The bridge itself is transport-level portable (plain TCP + `evaluateJavascript`,
 which JUCE backs with WKWebView/WebView2/WebKitGTK), but only the macOS column has

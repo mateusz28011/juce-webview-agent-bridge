@@ -37,9 +37,9 @@ ctest --test-dir build/test --output-on-failure
 ```
 
 Please run both before opening a PR. CI (`.github/workflows/tests.yml`) runs the
-JS suites on Node 18/22 and the C++ suite on macOS (required) plus Windows and
-Linux (non-blocking until those columns are verified for real — see the README's
-**Status** table).
+JS suites on Node 18/22 and the C++ suite on macOS, Windows, and Linux — all
+required. (Live-app usage on Windows/Linux is still unverified — see the
+README's **Status** table — but the suites gate every change.)
 
 ## Repo layout
 

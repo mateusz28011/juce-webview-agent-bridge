@@ -24,23 +24,17 @@ jobs:
           node-version: ${{ matrix.node }}
       - run: npm test
 
-  # C++ bridge suite against a real loopback server. macOS is the battle-tested
-  # platform (see README "Status") and gates the build; Windows/Linux compile+run
-  # the same suite but are non-blocking until that column is verified for real.
+  # C++ bridge suite against a real loopback server, on all three platforms.
+  # All required: the suite went green on Windows/Linux in CI run 2, so those
+  # columns gate the build like macOS does (live-app usage on them is still
+  # unverified — see README "Status" — but the suite itself must stay green).
   cpp:
     name: cpp (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    continue-on-error: ${{ matrix.experimental }}
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os: macos-14
-            experimental: false
-          - os: windows-latest
-            experimental: true
-          - os: ubuntu-latest
-            experimental: true
+        os: [macos-14, windows-latest, ubuntu-latest]
     steps:
       - uses: actions/checkout@v4
 

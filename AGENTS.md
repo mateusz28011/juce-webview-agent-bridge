@@ -37,8 +37,8 @@ npm run release [patch|minor|major|X.Y.Z]       # maintainer: bump 4 version sit
 ```
 
 Run BOTH suites before claiming a change works. CI (`.github/workflows/tests.yml`)
-mirrors them: JS on Node 18/22, C++ on macOS (required) + Windows/Linux
-(non-blocking, unverified columns).
+mirrors them and gates on all of it: JS on Node 18/22, C++ on macOS + Windows +
+Linux.
 
 ## Hard rules
 
