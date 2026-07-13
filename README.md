@@ -139,6 +139,34 @@ await expect(page.locator('.row')).toHaveCount(8);
 page.close();
 ```
 
+**As an e2e test suite (not just an interactive agent).** The same client slots
+straight into `node:test` — this is how the module's home project runs live e2e
+against its real plugin. The one structural difference from Playwright: the suite
+drives an app that is *already running* (a Debug build with the bridge), so make
+it self-skip when no bridge is up instead of failing:
+
+```js
+import { test, after } from 'node:test';
+import { connect, expect } from './tools/e2e.mjs';
+
+const page = await connect({ activate: 'My App' }).catch(() => null);
+
+test('saving a patch updates the list', { skip: !page && 'bridge not running' }, async () => {
+  await page.getByTestId('patch-name').fill('warm pad', { enter: true });
+  await page.locator('text=Save').click();
+  await expect(page.locator('.patch-row')).toHaveCount(1);
+  await expect.poll(() => page.backend('getPatchCount')).toBe(1); // assert on the ENGINE, not just the DOM
+});
+
+after(() => page?.close());
+```
+
+What you trade vs a browser-driven e2e stack: no native dialogs/file pickers, no
+request interception, single page, and the app must be launched first. What you
+get that no CDP stack can offer on an embedded WebView: the *real* native bridge
+and engine state in your assertions (`backend()` / `expect.poll`), the live
+console/network stream (`waitForResponse`), and WebGL-true screenshots.
+
 - **Selectors:** `css` (default), `text=<exact text>`, `role=<role>[name="<accessible name>"]`.
 - **Page:** `locator`, `getByTestId`, `evaluate(code)`, `readBig(expr)` (chunked read for
   large values — see below), `ariaSnapshot()` (compact role/name accessibility tree —
