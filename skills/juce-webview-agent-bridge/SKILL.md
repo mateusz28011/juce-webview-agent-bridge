@@ -1,9 +1,9 @@
 ---
-name: web-agent
+name: juce-webview-agent-bridge
 description: Drive a live embedded WebView from outside via the web-agent bridge (juce_webview_agent_bridge) — eval JS, stream console/network, click/fill, screenshot (incl. WebGL) on the real running app, no CDP. Use when inspecting or driving a running app's embedded web UI, the juce_webview_agent_bridge module, web-agent.mjs, or e2e.mjs.
 ---
 
-# web agent
+# juce webview agent bridge
 
 Drive the **real** embedded WebView of a running native app over a loopback JSON socket — the live runtime (native bridge, real state), not a dev-server copy in a separate browser. Works on WKWebView and WebView2 (no CDP). The app must embed the `juce_webview_agent_bridge` JUCE module (Debug builds only).
 

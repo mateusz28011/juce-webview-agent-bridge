@@ -137,7 +137,7 @@ unconditionally (a `std::shared_ptr` to a forward-declared type is fine).
 
 ## Agent skill
 
-`skills/web-agent/` is a [skill](https://skills.sh) that teaches a coding agent
+`skills/juce-webview-agent-bridge/` is a [skill](https://skills.sh) that teaches a coding agent
 (e.g. Claude Code) to drive the bridge — commands, the e2e client, diagnostic
 techniques, and the gotchas below in agent-digestible form:
 

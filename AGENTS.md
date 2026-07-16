@@ -24,7 +24,7 @@ limits, screenshot/TCC setup) — this file is the working map.
 - `tools/e2e.mjs` — Playwright-style client over the `eval` op (locators,
   auto-wait, expect, drag, readBig, backend, live sink events, render-perf probe).
 - `tests/` — both suites run WITHOUT any host app.
-- `skills/web-agent/SKILL.md` — the skills.sh agent skill; must stay in lockstep
+- `skills/juce-webview-agent-bridge/SKILL.md` — the skills.sh agent skill; must stay in lockstep
   with the clients' actual API.
 
 ## Commands

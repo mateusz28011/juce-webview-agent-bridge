@@ -49,7 +49,7 @@ README's **Status** table — but the suites gate every change.)
   (`e2e.mjs`), and `shared.mjs` (discovery + wire framing both import).
 - `tests/` — standalone JS (`node:test` vs a mock bridge) and C++ (Catch2 vs the
   real loopback server) suites.
-- `skills/web-agent/` — the [agent skill](https://skills.sh) teaching a coding
+- `skills/juce-webview-agent-bridge/` — the [agent skill](https://skills.sh) teaching a coding
   agent to drive the bridge.
 
 ## Protocol changes
