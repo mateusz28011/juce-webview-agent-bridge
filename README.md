@@ -12,16 +12,16 @@ browser-like toolkit on the **real** embedded WebView:
   `PerformanceObserver` resource timing;
 - **DOM / click / fill** (React-safe synthetic input);
 - **screenshot** the host window — or a cropped UI region — via the OS compositor
-  (captures WebGL/canvas, which `WKWebView`'s own snapshot APIs cannot) — **macOS
-  only today; Windows / Linux capture (incl. region crop) is a TODO**.
+  (captures WebGL/canvas, which in-WebView snapshot APIs can miss) on **macOS and
+  Windows 11**; Linux capture is a TODO.
 
 No Chrome DevTools Protocol is required. **WKWebView** (macOS) exposes no CDP at all
 for an embedded view; **WebView2** (Windows) can expose CDP, but only behind a
 remote-debugging flag you don't want in a shipping build. This bridge gives you one
 path that works the same on both without depending on that flag —
 eval/console/network/DOM ride on `evaluateJavascript`, which every JUCE backend
-already provides. Fair warning: only the macOS column is battle-tested today — see
-**Status** below.
+already provides. macOS is the daily-use platform; Windows/WebView2 has also been
+verified against the home project's real Debug standalone. See **Status** below.
 
 > ⚠️ **Security.** The bridge evaluates arbitrary JS. Access is gated only by the
 > loopback (`127.0.0.1`) bind plus a per-session token — and the token sits in
@@ -77,13 +77,14 @@ Honest test coverage, so you know what you're getting:
 
 | Area | macOS (WKWebView) | Windows (WebView2) | Linux |
 |---|---|---|---|
-| eval / console / network / DOM / e2e | ✅ used daily against a real plugin | ⚠️ written for it, untested against a real app | ⚠️ untested against a real app |
-| Native screenshot (`shot`) | ✅ (macOS 14+, ScreenCaptureKit) | ❌ TODO (`Windows.Graphics.Capture`) | ❌ TODO |
+| eval / console / network / DOM / e2e | ✅ used daily against a real plugin | ✅ verified against a real WebView2 Debug standalone | ⚠️ untested against a real app |
+| Native screenshot (`shot`) | ✅ (macOS 14+, ScreenCaptureKit) | ✅ (Windows 11, Windows.Graphics.Capture + D3D11) | ❌ TODO |
 | C++ + JS test suites | ✅ CI | ✅ CI | ✅ CI |
 
-The bridge itself is transport-level portable (plain TCP + `evaluateJavascript`,
-which JUCE backs with WKWebView/WebView2/WebKitGTK), but only the macOS column has
-seen real use. Reports and fixes for the other columns are very welcome.
+The Windows real-app verification covers discovery/auth, Unicode eval, console and
+fetch capture, DOM locators, React-safe fill/click, accessibility snapshots, large
+chunked reads, sink replay, and native full-window/region screenshots. WebKit layer
+inspection remains macOS-only. Linux real-app reports and fixes are very welcome.
 
 ## Install
 
@@ -156,7 +157,7 @@ tools/web-agent.mjs capture on               # also capture request+response bod
 tools/web-agent.mjs dom "#root > div"
 tools/web-agent.mjs click "button.play"
 tools/web-agent.mjs fill "input[name=bpm]" 128
-tools/web-agent.mjs shot /tmp/ui.png         # native (ScreenCaptureKit) shot of the host window
+tools/web-agent.mjs shot /tmp/ui.png         # native compositor shot of the host window
 tools/web-agent.mjs shot /tmp/panel.png "#panel"  # …cropped to an element's rect (smaller PNG)
 # options: --port <n>, --host <h>, --token <t> — but the client auto-discovers
 # port + token from ~/.web_agent_bridge.json, so usually none are needed.
@@ -216,7 +217,7 @@ this module.
 - **Page:** `locator`, `getByTestId`, `evaluate(code)`, `readBig(expr)` (chunked read for
   large values — see docs/e2e.md), `ariaSnapshot()` (compact role/name accessibility tree —
   far cheaper to read back than `outerHTML`), `screenshot({path, clip})` (native, incl. WebGL — via the
-  `shot` op; `clip: {x,y,w,h}` in CSS px crops to a region, macOS), `waitForFunction(expr)`,
+  `shot` op; `clip: {x,y,w,h}` in CSS px crops to a region, macOS/Windows), `waitForFunction(expr)`,
   `poll(expr, pred)` / `pollStable(expr)` (settle primitives — see docs/e2e.md),
   `measureRenderPerf({durationMs, motionSelector})` (main-thread jank probe — see docs/e2e.md),
   `capabilities()` (the `hello` handshake), the live event stream (`on` / `waitForEvent` /
@@ -251,19 +252,24 @@ sink-frame format, and discovery details are in [docs/protocol.md](docs/protocol
 
 ## Known limits
 
-- **Screenshot** is captured natively by the host through the window-server
-  compositor (macOS: ScreenCaptureKit, **macOS 14+**), so GPU-composited
+- **Screenshot** is captured natively by the host through the window compositor
+  (macOS: ScreenCaptureKit, **macOS 14+**; Windows 11:
+  `Windows.Graphics.Capture` + D3D11), so GPU-composited
   WebGL/canvas is included — unlike `WKWebView.takeSnapshot`, which returns black
   for hardware-accelerated content ([WebKit #198107](https://bugs.webkit.org/show_bug.cgi?id=198107)).
-  The **host app** needs Screen Recording permission (one-time TCC prompt on first
-  `shot`) — and on Debug builds the grant is keyed to your code signature, so an
+  On macOS, the **host app** needs Screen Recording permission (one-time TCC prompt
+  on first `shot`) — and on Debug builds the grant is keyed to your code signature, so an
   ad-hoc-signed app loses it on every rebuild; the fix (a stable self-signed
   identity) and the `-3801` error explained:
   [docs/screen-recording.md](docs/screen-recording.md). A `rect` (CSS px) crops to
-  a UI region host-side — the host owns the geometry (scale, title bar, clamp), so
-  the client just passes an element's `getBoundingClientRect()`. **Windows / Linux
-  capture (incl. crop) is a TODO** (`Windows.Graphics.Capture` of the HWND /
-  XComposite). The `bounds` op remains available for client-side capture fallbacks.
+  a UI region host-side — the host owns the geometry (per-window DPI, title bar,
+  client-area offset, clamp), so the client just passes an element's
+  `getBoundingClientRect()`. On Windows the bridge falls back from a hardware D3D11
+  device to WARP and treats optional cursor/border suppression as best-effort, so it
+  does not depend on a particular GPU or Windows 11 revision. The target window must
+  still be capturable by the desktop compositor; minimized/headless windows may time
+  out. **Linux capture remains a TODO** (XComposite). The `bounds` op remains
+  available for client-side capture fallbacks.
 - **Synthetic input** dispatched from JS has `isTrusted === false`, so APIs gated
   behind a user gesture (file pickers, some clipboard/fullscreen) are out of reach.
 - **eval errors** are only reported on WKWebView; on WebView2 a failed eval looks
@@ -299,8 +305,8 @@ message loop can be pumped for the eval/bounds cases).
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) — ground rules (app-agnostic, zero client
-deps, debug-only), how to run both test suites, and the release flow. Windows /
-Linux verification and capture support are the most wanted contributions.
+deps, debug-only), how to run both test suites, and the release flow. Linux capture
+support and Linux real-app verification are the most wanted contributions.
 
 ## License
 

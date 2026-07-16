@@ -24,7 +24,7 @@ The client auto-discovers port + session token from `~/.web_agent_bridge.json` (
 - `capture on|off` — toggle request+response bodies/headers, WebSocket/SSE frames, and beacon payloads on the network stream.
 - `backlog` — dump the page ring buffer (events from before you connected).
 - `logs` — live stream of console + errors + network (Ctrl-C to stop); `net` events carry `data.kind` ∈ `fetch`/`xhr`/`ws`/`sse`/`beacon`/`timing`.
-- `shot [out.png] [selector]` — native compositor screenshot (macOS); a selector crops to that element's rect (much smaller PNG / fewer tokens). Prints the path.
+- `shot [out.png] [selector]` — native compositor screenshot (macOS/Windows); a selector crops to that element's rect (much smaller PNG / fewer tokens). Prints the path.
 - `layerdebug on|off` — WebKit compositing debug overlays (layer borders + repaint counters) on the live WKWebView via WKPreferences SPI (macOS only). The overlays render into the window, so `shot` captures them — attribute repaints without a Web Inspector session. Turn OFF before any pixel-comparison capture (the overlays are pixels too), and keep the page still (pause app animations/transport) or churn pollutes every counter.
 - `layertree` — dump the WKWebView's remote CALayer tree as text (`_caLayerTreeAsText` SPI, macOS only): a programmatic compositing-layer census, no screenshot needed. Limits: geometry only — repaint COUNTS are drawn web-process-side into the backing, so per-layer repaint attribution still needs `layerdebug on` + `shot`.
 
@@ -72,6 +72,6 @@ page.close();
 - **One driver at a time** — two clients driving the same app concurrently (a background probe plus an ad-hoc script) interleave their clicks/evals and corrupt both runs.
 - **Synthetic clicks lie about click-handler cost** — frameworks that render synchronously inside *trusted* discrete events (React) defer their commit for a dispatched `.click()`, so a bridge click measuring "1ms" says nothing about the real click's cost. Verify interaction-latency work with a native inspector Timeline recording of physical clicks.
 - **`eval` errors are invisible on WebView2** (a failure looks like `null`) — rely on the `logs`/error stream there.
-- **`shot`** captures the visible window via the OS compositor, so WebGL/canvas IS included (unlike in-webview snapshots); it needs Screen Recording permission for the app and only captures what's on screen (macOS 14+; Windows/Linux capture is a TODO). Pass a selector (CLI) or `clip`/`locator.screenshot()` (e2e) to crop to a region — a much smaller PNG, so prefer it over full-window shots to save tokens.
+- **`shot`** captures the window via the OS compositor, so WebGL/canvas IS included (unlike in-webview snapshots). On macOS 14+ it needs Screen Recording permission; on Windows 11 it uses Windows.Graphics.Capture and needs a compositor-capturable, non-minimized window. Linux capture is a TODO. Pass a selector (CLI) or `clip`/`locator.screenshot()` (e2e) to crop to a region — a much smaller PNG, so prefer it over full-window shots to save tokens.
 
 Full wire protocol, discovery internals, integration steps, and limits: the module's `README.md`.

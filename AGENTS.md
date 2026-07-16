@@ -15,8 +15,9 @@ limits, screenshot/TCC setup) — this file is the working map.
   - `detail/CaptureScript.h` — page-side capture (console/error/fetch/XHR/WS/
     SSE/beacon/timing), injected via `withUserScript`. Everything in it is
     deliberately fail-silent — it must never break the host page.
-  - `detail/Screenshot_mac.mm` / `Screenshot_other.cpp` — native window capture
-    (ScreenCaptureKit, macOS 14+; other platforms are a stub returning an error).
+  - `detail/Screenshot_mac.mm` / `Screenshot_windows.cpp` — native window capture
+    (ScreenCaptureKit on macOS 14+; Windows.Graphics.Capture + D3D11 on Windows 11).
+    `Screenshot_other.cpp` is the unsupported-platform stub.
 - `tools/web-agent.mjs` — one-shot CLI (`ping|hello|eval|dom|click|fill|capture|
   backlog|logs|shot`), auto-discovers `{port,token}` from `~/.web_agent_bridge.json`.
 - `tools/shared.mjs` — SSOT for what both clients must agree on: `loadDiscovery`,
@@ -53,8 +54,9 @@ Linux.
   file is `0600`; loopback is the trust boundary.
 - **Protocol is consumed by third parties.** Additive changes only (advertise
   new ops in the `hello` reply); breaking changes bump `protocolVersion`.
-- **Threading (C++):** `evaluateJavascript`, bounds, and screenshot run on the
-  message thread (marshalled via `callAsync` + weak_ptr); sink broadcast runs on
+- **Threading (C++):** `evaluateJavascript` and bounds run on the message thread
+  (marshalled via `callAsync` + weak_ptr). Screenshot geometry is read there, while
+  Windows capture/PNG encoding completes on a worker; sink broadcast runs on
   a dedicated writer thread, never the message thread; socket writes are
   serialized against close via `writeMutex`. Preserve these invariants.
 - **Version lives in 4 places** (package.json, module declaration, tests CMake,

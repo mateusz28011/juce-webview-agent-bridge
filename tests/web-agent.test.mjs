@@ -83,7 +83,11 @@ function startMockBridge({ onEval, requireToken = 'T', splitUtf8 = false, afterA
 
 function runClient(args, { home, env = {} } = {}) {
   return new Promise((resolve) => {
-    const child = spawn(process.execPath, [CLIENT, ...args], { env: { ...process.env, HOME: home, ...env } });
+    // os.homedir() reads USERPROFILE on Windows and HOME on Unix. Override both
+    // so every spawned CLI uses this test's isolated discovery files.
+    const child = spawn(process.execPath, [CLIENT, ...args], {
+      env: { ...process.env, HOME: home, USERPROFILE: home, ...env },
+    });
     let out = '';
     let err = '';
     child.stdout.on('data', (d) => (out += d));
@@ -212,9 +216,10 @@ test('shot <out>: sends the shot op with the path and prints the returned path',
   try {
     const home = tempHomeWith({ port, token: 'T' });
     const { code, out } = await runClient(['shot', '/tmp/ui.png'], { home });
+    const expectedPath = path.resolve('/tmp/ui.png');
     assert.equal(code, 0);
-    assert.equal(out, '/tmp/ui.png');
-    assert.equal(state.lastShot.path, '/tmp/ui.png');
+    assert.equal(out, expectedPath);
+    assert.equal(state.lastShot.path, expectedPath);
     assert.equal(state.lastShot.rect, undefined); // no selector -> whole window
   } finally {
     server.close();
@@ -227,8 +232,9 @@ test('shot <out> <selector>: computes the element rect and sends it with the sho
   try {
     const home = tempHomeWith({ port, token: 'T' });
     const { code, out } = await runClient(['shot', '/tmp/ui.png', '#panel'], { home });
+    const expectedPath = path.resolve('/tmp/ui.png');
     assert.equal(code, 0);
-    assert.equal(out, '/tmp/ui.png');
+    assert.equal(out, expectedPath);
     assert.match(state.lastEval, /getBoundingClientRect/);
     assert.deepEqual(state.lastShot.rect, { x: 5, y: 6, w: 70, h: 80 });
   } finally {

@@ -8,4 +8,9 @@
 
 #include "detail/WebAgentBridge.cpp"
 #include "detail/LayerDebug_other.cpp"
-#include "detail/Screenshot_other.cpp"
+
+#if JUCE_WINDOWS
+ #include "detail/Screenshot_windows.cpp"
+#else
+ #include "detail/Screenshot_other.cpp"
+#endif

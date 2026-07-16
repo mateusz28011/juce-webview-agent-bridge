@@ -2,11 +2,7 @@
   ==============================================================================
     Screenshot_other.cpp  (module: juce_webview_agent_bridge)
 
-    Non-Apple window capture. Stubbed for now.
-    TODO (Windows): capture + region crop via Windows.Graphics.Capture of the host
-                    HWND (peer->getNativeHandle()); ICoreWebView2.CapturePreview is
-                    unreachable since JUCE keeps the COM pointer private. Honour
-                    viewportCrop (logical px relative to comp) like the macOS path.
+    Unsupported-platform window capture. Stubbed for now.
     TODO (Linux):   capture + crop via XComposite (redirected pixmap); WebKitGTK's
                     get_snapshot() hits the same black-WebGL ceiling, so it is not
                     the path to take.
@@ -27,8 +23,8 @@ void captureWindowAsync (juce::Component& comp,
 {
     juce::ignoreUnused (comp, viewportCrop);
     done (false, target,
-          "screenshot is only implemented on macOS (ScreenCaptureKit); this platform "
-          "is unsupported (Windows.Graphics.Capture / XComposite region crop are TODOs)");
+          "native screenshot is implemented on macOS and Windows; this platform "
+          "is unsupported (Linux XComposite region crop is a TODO)");
 }
 
 } // namespace web_agent::detail

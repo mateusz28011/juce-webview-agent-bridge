@@ -7,11 +7,13 @@
     content out-of-process on the GPU, so neither JUCE's createComponentSnapshot
     nor AppKit's cacheDisplayInRect can read those pixels — only a
     compositor-level capture can. This declares one async entry point;
-    per-platform implementations live in Screenshot_mac.mm / Screenshot_other.cpp.
+    per-platform implementations live in Screenshot_mac.mm,
+    Screenshot_windows.cpp, and Screenshot_other.cpp.
 
       macOS:   ScreenCaptureKit (SCScreenshotManager), captures the app's own
                window incl. WebGL. Requires Screen Recording permission.
-      Windows: TODO — WebView2 ICoreWebView2.CapturePreview.
+      Windows: Windows.Graphics.Capture + D3D11 captures the HWND compositor
+               surface, including WebView2/WebGL.
       other:   not implemented (returns an error).
 
   ==============================================================================
@@ -63,6 +65,37 @@ inline juce::Rectangle<int> computeCropPx (juce::Rectangle<int>   imagePx,
     const int b = (int) std::ceil  (regionPts.getBottom() * scale);
 
     return juce::Rectangle<int> (x, y, r - x, b - y).getIntersection (imagePx);
+}
+
+/** Places a component (whose coordinates are relative to the top-level client
+    area) within a compositor capture that may contain either the whole native
+    window or only its client area. Rectangles ending in Px are device pixels;
+    componentInClientPts is in JUCE logical points. */
+inline juce::Rectangle<float> componentInCapturedWindowPts (
+    juce::Rectangle<int> imagePx,
+    juce::Rectangle<int> windowPx,
+    juce::Rectangle<int> clientInWindowPx,
+    juce::Rectangle<int> componentInClientPts,
+    double scale)
+{
+    if (scale <= 0.0 || imagePx.isEmpty())
+        return {};
+
+    const auto sizeDistance = [] (juce::Rectangle<int> a, juce::Rectangle<int> b)
+    {
+        return std::abs (a.getWidth() - b.getWidth())
+             + std::abs (a.getHeight() - b.getHeight());
+    };
+
+    const bool capturedWholeWindow = sizeDistance (imagePx, windowPx)
+                                  <= sizeDistance (imagePx, clientInWindowPx.withPosition (0, 0));
+    const float clientX = capturedWholeWindow ? (float) (clientInWindowPx.getX() / scale) : 0.0f;
+    const float clientY = capturedWholeWindow ? (float) (clientInWindowPx.getY() / scale) : 0.0f;
+
+    return { clientX + (float) componentInClientPts.getX(),
+             clientY + (float) componentInClientPts.getY(),
+             (float) componentInClientPts.getWidth(),
+             (float) componentInClientPts.getHeight() };
 }
 
 /** Captures the native window hosting `comp` to a PNG.

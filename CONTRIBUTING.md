@@ -2,8 +2,8 @@
 
 Thanks for your interest! This is a small, focused module — contributions that fit
 its shape are very welcome, especially anything in the untested columns of the
-README's **Status** table (Windows/WebView2 verification, `Windows.Graphics.Capture`
-screenshot, Linux).
+README's **Status** table (Linux capture and real-app verification, plus additional
+Windows/WebView2 configurations).
 
 ## Ground rules
 
@@ -38,8 +38,8 @@ ctest --test-dir build/test --output-on-failure
 
 Please run both before opening a PR. CI (`.github/workflows/tests.yml`) runs the
 JS suites on Node 18/22 and the C++ suite on macOS, Windows, and Linux — all
-required. (Live-app usage on Windows/Linux is still unverified — see the
-README's **Status** table — but the suites gate every change.)
+required. (Live-app usage on Linux is still unverified — see the README's
+**Status** table — but the suites gate every change.)
 
 ## Repo layout
 

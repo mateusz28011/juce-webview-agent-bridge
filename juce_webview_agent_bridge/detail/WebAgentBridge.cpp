@@ -306,10 +306,10 @@ struct WebAgentBridge::Impl : public std::enable_shared_from_this<WebAgentBridge
            #endif
 
             bool screenshotAvailable = false;
-           #if JUCE_MAC
+           #if JUCE_MAC || JUCE_WINDOWS
             {
                 std::lock_guard<std::mutex> lk (fnMutex);
-                screenshotAvailable = (screenshotFn != nullptr); // native capture is macOS-only today
+                screenshotAvailable = (screenshotFn != nullptr);
             }
            #endif
             r->setProperty ("screenshotAvailable", screenshotAvailable);

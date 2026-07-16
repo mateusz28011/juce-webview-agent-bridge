@@ -349,6 +349,31 @@ TEST_CASE ("computeCropPx maps a viewport rect to clamped device pixels", "[web_
     REQUIRE (web_agent::detail::computeCropPx ({}, comp, {}, scale).isEmpty());
 }
 
+TEST_CASE ("componentInCapturedWindowPts handles full-window and client-only captures",
+           "[web_agent][screenshot]")
+{
+    using juce::Rectangle;
+    const Rectangle<int> windowPx (0, 0, 1200, 900);
+    const Rectangle<int> clientInWindowPx (8, 31, 1184, 861);
+    const Rectangle<int> componentInClientPts (10, 20, 500, 400);
+    constexpr double scale = 1.5;
+
+    const auto inWholeWindow = web_agent::detail::componentInCapturedWindowPts (
+        windowPx, windowPx, clientInWindowPx, componentInClientPts, scale);
+    REQUIRE (std::abs (inWholeWindow.getX() - 15.333333f) < 0.0001f);
+    REQUIRE (std::abs (inWholeWindow.getY() - 40.666667f) < 0.0001f);
+    REQUIRE (inWholeWindow.getWidth() == 500.0f);
+    REQUIRE (inWholeWindow.getHeight() == 400.0f);
+
+    const Rectangle<int> clientCapture (0, 0, 1184, 861);
+    const auto inClientOnly = web_agent::detail::componentInCapturedWindowPts (
+        clientCapture, windowPx, clientInWindowPx, componentInClientPts, scale);
+    REQUIRE (inClientOnly == Rectangle<float> (10.0f, 20.0f, 500.0f, 400.0f));
+
+    REQUIRE (web_agent::detail::componentInCapturedWindowPts (
+        windowPx, windowPx, clientInWindowPx, componentInClientPts, 0.0).isEmpty());
+}
+
 TEST_CASE ("WebAgentBridge hello reports protocol version + capabilities", "[web_agent][bridge]")
 {
     auto disc = tempDisc ("wab_disc_hello.json");
@@ -380,7 +405,12 @@ TEST_CASE ("WebAgentBridge hello reports protocol version + capabilities", "[web
 
    #if JUCE_MAC
     REQUIRE (r.getProperty ("platform", juce::var()).toString() == "mac");
-    REQUIRE ((bool) r.getProperty ("screenshotAvailable", false)); // a screenshot fn is registered above
+   #elif JUCE_WINDOWS
+    REQUIRE (r.getProperty ("platform", juce::var()).toString() == "windows");
+   #endif
+
+   #if JUCE_MAC || JUCE_WINDOWS
+    REQUIRE ((bool) r.getProperty ("screenshotAvailable", false));
    #endif
 
     bridge.stop();

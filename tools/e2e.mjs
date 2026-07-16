@@ -708,7 +708,7 @@ class Page {
     this.log(`screenshot${clip ? ' (region)' : ''}${path ? ' ' + path : ''}`);
     const r = await this.session.request(
       { op: 'shot', ...(path ? { path } : {}), ...(clip ? { rect: clip } : {}) }, { timeoutMs: 30000 });
-    if (!r.ok) throw new Error(r.error || 'screenshot failed (Screen Recording permission?)');
+    if (!r.ok) throw new Error(r.error || 'native screenshot failed');
     return r.path;
   }
 

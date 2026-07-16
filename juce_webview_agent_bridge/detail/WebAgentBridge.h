@@ -52,7 +52,8 @@ public:
         successful `null`, so rely on the console/error stream there.
         THREADING: a custom EvalFn must invoke EvalCallback synchronously or on the
         message thread only — the connect() helper does (evaluateJavascript's
-        completion fires on the message thread). Same for ScreenshotCallback. */
+        completion fires on the message thread). ScreenshotCallback may run on a
+        capture worker; the bridge serializes its socket reply. */
     using EvalCallback = std::function<void (bool ok, juce::var result, juce::String error)>;
     using EvalFn       = std::function<void (const juce::String& code, EvalCallback)>;
     using BoundsFn     = std::function<juce::Rectangle<int>()>;

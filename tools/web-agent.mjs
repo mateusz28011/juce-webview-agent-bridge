@@ -14,7 +14,7 @@
  *   web-agent.mjs capture <on|off>       toggle response-body capture
  *   web-agent.mjs backlog                dump the page ring buffer
  *   web-agent.mjs logs [--backlog]       stream console/network (Ctrl-C to stop); --backlog dumps recent history first
- *   web-agent.mjs shot [out.png] [sel]   native screenshot (macOS); with a selector, crop to that element
+ *   web-agent.mjs shot [out.png] [sel]   native screenshot (macOS/Windows); with a selector, crop to that element
  *   web-agent.mjs layerdebug [on|off]    WebKit compositing overlays: layer borders + repaint counters (macOS)
  *   web-agent.mjs layertree              dump the remote CALayer tree as text (macOS, programmatic layer census)
  *   web-agent.mjs ping                   liveness check
@@ -162,7 +162,7 @@ async function main() {
       break;
     }
     case 'shot': {
-      // Native capture inside the plugin (ScreenCaptureKit) — includes WebGL,
+      // Native capture inside the plugin (ScreenCaptureKit/WGC) — includes WebGL,
       // no external CLI. Optional path: where the plugin writes the PNG. Optional
       // selector: crop to that element's rect (a much smaller PNG / fewer tokens).
       // Resolve to an absolute path against the CLIENT's CWD: the plugin runs
@@ -178,7 +178,7 @@ async function main() {
         rect = box;
       }
       const r = await request({ op: 'shot', ...(out ? { path: out } : {}), ...(rect ? { rect } : {}) }, { timeoutMs: 30000 });
-      if (!r.ok) throw new Error(r.error || 'screenshot failed (Screen Recording permission?)');
+      if (!r.ok) throw new Error(r.error || 'native screenshot failed');
       console.log(r.path);
       break;
     }
