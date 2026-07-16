@@ -658,6 +658,19 @@ class Page {
     };
   }
 
+  /** Toggle WebKit's compositing debug overlays (layer borders + repaint
+      counters) on the host's WKWebView via the bridge `layerdebug` op. The
+      overlays render into the window, so `screenshot()` captures them — count
+      layers / attribute repaints from a script, no Web Inspector session.
+      macOS-only; throws where the backend has no such SPI. Remember to turn it
+      OFF before any pixel-comparison capture: the overlays are pixels too. */
+  async layerDebug(enabled = true) {
+    this.log(`layerdebug ${enabled ? 'on' : 'off'}`);
+    const r = await this.session.request({ op: 'layerdebug', enabled }, { timeoutMs: 10000 });
+    if (!r.ok) throw new Error(r.error || 'layerdebug unavailable');
+    return true;
+  }
+
   /** Native screenshot of the host window (incl. WebGL) via the bridge `shot` op.
       Writes a PNG host-side and returns its path. Pass { path } to choose where, and
       { clip: {x,y,w,h} } (CSS px) to crop to a UI region for a much smaller PNG. */
