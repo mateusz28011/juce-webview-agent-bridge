@@ -15,7 +15,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-import { activateApp, connect, expect, fileLogger } from '../tools/e2e.mjs';
+import { activateApp, connect, expect, fileLogger, parseLayerTree } from '../tools/e2e.mjs';
 
 // Close every page opened during a test, even if an assertion threw first — a
 // leaked persistent socket would otherwise keep node --test from exiting.
@@ -26,7 +26,7 @@ afterEach(() => { for (const p of openPages.splice(0)) { try { p.close(); } catc
 // test script the result per eval via onEval(code, state). It also tracks every
 // connected socket so a test can push unsolicited `sink` frames (the live
 // console/network/error stream) via the returned pushSink() helper.
-function startMock({ onEval, onShot } = {}) {
+function startMock({ onEval, onShot, onLayerTree } = {}) {
   const state = { evals: [], token: null, sockets: [] };
   const server = net.createServer((sock) => {
     sock.on('error', () => {});
@@ -65,6 +65,16 @@ function startMock({ onEval, onShot } = {}) {
         if (m.op === 'shot') {
           const r = onShot ? onShot(m) : { ok: true, path: m.path || '/tmp/web-agent-shot.png' };
           reply({ op: 'shot', ...r });
+          continue;
+        }
+        if (m.op === 'layerdebug') {
+          state.layerDebug = m.enabled;
+          reply({ op: 'layerdebug', ok: true, enabled: m.enabled });
+          continue;
+        }
+        if (m.op === 'layertree') {
+          const r = onLayerTree ? onLayerTree(m) : { ok: false, error: 'no WKWebView found' };
+          reply({ op: 'layertree', ...r });
           continue;
         }
         reply({ op: m.op, ok: false, error: 'unknown' });
@@ -540,6 +550,55 @@ test('page.screenshot forwards a clip rect to the shot op', async () => {
     assert.deepEqual(shotMsg.rect, { x: 10, y: 20, w: 100, h: 50 });
     page.close();
   } finally { server.close(); }
+});
+
+const LAYER_TREE_FIXTURE = `(CALayer tree root
+  (layer bounds [x: 0 y: 0 width: 1300 height: 1000])
+  (layer position [x: 1 y: 1])
+  (sublayers
+    (
+      (layer bounds [x: 0 y: 0 width: 398 height: 209])
+      (layer anchorPoint [x: 0 y: 0]))
+    (
+      (layer bounds [x: -12 y: -12.5 width: 398 height: 209]))
+    (
+      (layer bounds [x: 0 y: 0 width: 26 height: 106]))))`;
+
+test('page.layerDebug toggles the layerdebug op and page.layerTree returns the dump', async () => {
+  const { server, port, state } = await startMock({
+    onEval: () => 'ok',
+    onLayerTree: () => ({ ok: true, text: LAYER_TREE_FIXTURE })
+  });
+  try {
+    const page = await openPage(port);
+    assert.equal(await page.layerDebug(true), true);
+    assert.equal(state.layerDebug, true);
+    await page.layerDebug(false);
+    assert.equal(state.layerDebug, false);
+    assert.equal(await page.layerTree(), LAYER_TREE_FIXTURE);
+    page.close();
+  } finally { server.close(); }
+});
+
+test('page.layerTree surfaces the no-webview error as a thrown error', async () => {
+  const { server, port } = await startMock({ onEval: () => 'ok' });
+  try {
+    const page = await openPage(port);
+    await assert.rejects(() => page.layerTree(), /no WKWebView found/);
+    page.close();
+  } finally { server.close(); }
+});
+
+test('parseLayerTree extracts every layer bounds entry, incl. negative/fractional', () => {
+  const layers = parseLayerTree(LAYER_TREE_FIXTURE);
+  assert.deepEqual(layers, [
+    { x: 0, y: 0, width: 1300, height: 1000 },
+    { x: 0, y: 0, width: 398, height: 209 },
+    { x: -12, y: -12.5, width: 398, height: 209 },
+    { x: 0, y: 0, width: 26, height: 106 }
+  ]);
+  assert.deepEqual(parseLayerTree(''), []);
+  assert.deepEqual(parseLayerTree(null), []);
 });
 
 test('locator.screenshot crops to the element box', async () => {

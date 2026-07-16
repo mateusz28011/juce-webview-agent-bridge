@@ -55,6 +55,25 @@ export function activateApp(appName) {
  *  echoes them to stderr so a live run shows progress instead of going silent.
  *  Generic/agnostic: it records whatever the caller logs. connect() wires one up
  *  automatically (override via { log } or { logFile }, or $WAE_LOG_FILE). */
+/** Parse a `layertree` op dump (the `_caLayerTreeAsText` format) into a flat
+    array of layer bounds `{ x, y, width, height }` — the programmatic
+    compositing-layer census. Pure; pairs with `page.layerTree()`:
+
+      const layers = parseLayerTree(await page.layerTree());
+      const canvases = layers.filter(l => l.width === 398 && l.height === 209);
+
+    The dump nests layers as parenthesized blocks; for a census the flat list
+    of `(layer bounds [x: … y: … width: … height: …])` entries is what counts,
+    so nesting is deliberately ignored. */
+export function parseLayerTree(text) {
+  const layers = [];
+  const re = /\(layer bounds \[x: (-?[\d.]+) y: (-?[\d.]+) width: (-?[\d.]+) height: (-?[\d.]+)\]\)/g;
+  for (const m of String(text ?? '').matchAll(re)) {
+    layers.push({ x: Number(m[1]), y: Number(m[2]), width: Number(m[3]), height: Number(m[4]) });
+  }
+  return layers;
+}
+
 export function fileLogger(file, { echo = true } = {}) {
   const stamp = () => new Date().toISOString().slice(11, 23);
   return (msg) => {
