@@ -14,7 +14,7 @@
 #     cmake -S tests -B build/test -DWAB_JUCE_DIR=/path/to/JUCE
 # ==============================================================================
 cmake_minimum_required(VERSION 3.22)
-project(web_agent_bridge_tests VERSION 0.2.0 LANGUAGES C CXX)
+project(web_agent_bridge_tests VERSION 0.2.1 LANGUAGES C CXX)
 
 # The module under test is the juce_webview_agent_bridge/ dir next to tests/ (JUCE
 # requires the module directory to be named exactly like the module ID, so it
