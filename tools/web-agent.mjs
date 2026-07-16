@@ -99,6 +99,16 @@ async function main() {
       console.log(r.ok ? `pong (127.0.0.1:${PORT})` : 'no pong');
       break;
     }
+    case 'layerdebug': {
+      const enabled = rest[0] !== 'off';
+      const r = await request({ op: 'layerdebug', enabled });
+      console.log(
+        r.ok
+          ? `compositing overlays ${enabled ? 'ON' : 'OFF'} (layer borders + repaint counters)`
+          : `failed: ${r.error || 'unavailable'}`
+      );
+      break;
+    }
     case 'hello': {
       const r = await request({ op: 'hello' });
       console.log(fmt({

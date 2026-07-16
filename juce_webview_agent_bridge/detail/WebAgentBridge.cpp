@@ -9,6 +9,7 @@
 #if WEB_AGENT_BRIDGE_ENABLED
 
 #include "CaptureScript.h"
+#include "LayerDebug.h"
 #include "Screenshot.h"
 
 #include <atomic>
@@ -228,7 +229,7 @@ struct WebAgentBridge::Impl : public std::enable_shared_from_this<WebAgentBridge
     // advertisement can no longer drift from the dispatch.
     using OpHandler = void (Impl::*) (const std::shared_ptr<Connection>&, const juce::var& id, const juce::var& msg);
     struct OpEntry { const char* name; OpHandler fn; };
-    static const OpEntry kOpTable[7];
+    static const OpEntry kOpTable[8];
 
     // Post-gate auth: the connection is already authenticated (or no token is
     // set), so a stray {"op":"auth"} is simply acknowledged.
@@ -396,6 +397,33 @@ struct WebAgentBridge::Impl : public std::enable_shared_from_this<WebAgentBridge
         });
     }
 
+    void handleLayerDebug (const std::shared_ptr<Connection>& conn, const juce::var& id, const juce::var& msg)
+    {
+        // Toggle WebKit's compositing borders + repaint counters on the live
+        // WKWebView (macOS only; see LayerDebug.h). AppKit view walking must
+        // happen on the message thread.
+        const bool enabled = (bool) msg.getProperty ("enabled", juce::var (true));
+
+        std::weak_ptr<Impl>       weakSelf = shared_from_this();
+        std::weak_ptr<Connection> weakConn = conn;
+
+        juce::MessageManager::callAsync ([weakSelf, weakConn, id, enabled]()
+        {
+            auto self = weakSelf.lock();
+            if (! self || ! self->running.load()) return;
+
+            const bool ok = detail::setCompositingDebugOverlays (enabled);
+
+            auto r = makeReply (id, "layerdebug", ok);
+            r->setProperty ("enabled", enabled);
+            if (! ok)
+                r->setProperty ("error", "no WKWebView found or SPI unavailable (non-mac backend?)");
+
+            if (auto c = weakConn.lock())
+                c->write (makeLine (juce::var (r.get())));
+        });
+    }
+
     void handleShot (const std::shared_ptr<Connection>& conn, const juce::var& id, const juce::var& msg)
     {
         const auto pathStr = msg.getProperty ("path", juce::var()).toString();
@@ -510,13 +538,14 @@ struct WebAgentBridge::Impl : public std::enable_shared_from_this<WebAgentBridge
     }
 };
 
-const WebAgentBridge::Impl::OpEntry WebAgentBridge::Impl::kOpTable[7] = {
+const WebAgentBridge::Impl::OpEntry WebAgentBridge::Impl::kOpTable[8] = {
     { "hello",       &Impl::handleHello      },
     { "ping",        &Impl::handlePing       },
     { "auth",        &Impl::handleAuth       },
     { "eval",        &Impl::handleEval       },
     { "bounds",      &Impl::handleBounds     },
     { "shot",        &Impl::handleShot       },
+    { "layerdebug",  &Impl::handleLayerDebug },
     { "sink_replay", &Impl::handleSinkReplay },
 };
 

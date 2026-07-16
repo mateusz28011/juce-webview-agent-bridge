@@ -11,4 +11,5 @@
 #include "juce_webview_agent_bridge.h"
 
 #include "detail/WebAgentBridge.cpp"
+#include "detail/LayerDebug_mac.mm"
 #include "detail/Screenshot_mac.mm"
