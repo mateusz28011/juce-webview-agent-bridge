@@ -67,6 +67,31 @@ bool setCompositingDebugOverlays (bool enabled)
     return applied && webViews.count > 0;
 }
 
+std::string getCaLayerTreeAsText()
+{
+    NSMutableArray<WKWebView*>* webViews = [NSMutableArray array];
+
+    for (NSWindow* window in NSApp.windows)
+        if (window.contentView != nil)
+            collectWebViews (window.contentView, webViews);
+
+    if (webViews.count == 0)
+        return {};
+
+    // SPI from WKWebViewPrivateForTesting.h: synchronously returns the
+    // UI-process (remote) CALayer tree as text — one entry per compositing
+    // layer with geometry. Guarded so a renamed selector degrades to "not
+    // available" instead of crashing the (debug-only) host.
+    SEL dump = NSSelectorFromString (@"_caLayerTreeAsText");
+
+    WKWebView* webView = webViews.firstObject;
+    if (! [webView respondsToSelector: dump])
+        return {};
+
+    NSString* text = ((NSString* (*) (id, SEL)) objc_msgSend) (webView, dump);
+    return text != nil ? std::string ([text UTF8String]) : std::string();
+}
+
 } // namespace web_agent::detail
 
 #endif

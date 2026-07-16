@@ -15,6 +15,8 @@
  *   web-agent.mjs backlog                dump the page ring buffer
  *   web-agent.mjs logs [--backlog]       stream console/network (Ctrl-C to stop); --backlog dumps recent history first
  *   web-agent.mjs shot [out.png] [sel]   native screenshot (macOS); with a selector, crop to that element
+ *   web-agent.mjs layerdebug [on|off]    WebKit compositing overlays: layer borders + repaint counters (macOS)
+ *   web-agent.mjs layertree              dump the remote CALayer tree as text (macOS, programmatic layer census)
  *   web-agent.mjs ping                   liveness check
  *   web-agent.mjs hello                  capabilities handshake (version, platform, ops, screenshotAvailable)
  *
@@ -107,6 +109,11 @@ async function main() {
           ? `compositing overlays ${enabled ? 'ON' : 'OFF'} (layer borders + repaint counters)`
           : `failed: ${r.error || 'unavailable'}`
       );
+      break;
+    }
+    case 'layertree': {
+      const r = await request({ op: 'layertree' });
+      console.log(r.ok ? r.text : `failed: ${r.error || 'unavailable'}`);
       break;
     }
     case 'hello': {

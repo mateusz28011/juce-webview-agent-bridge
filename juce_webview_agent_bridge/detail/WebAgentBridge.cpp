@@ -229,7 +229,7 @@ struct WebAgentBridge::Impl : public std::enable_shared_from_this<WebAgentBridge
     // advertisement can no longer drift from the dispatch.
     using OpHandler = void (Impl::*) (const std::shared_ptr<Connection>&, const juce::var& id, const juce::var& msg);
     struct OpEntry { const char* name; OpHandler fn; };
-    static const OpEntry kOpTable[8];
+    static const OpEntry kOpTable[9];
 
     // Post-gate auth: the connection is already authenticated (or no token is
     // set), so a stray {"op":"auth"} is simply acknowledged.
@@ -424,6 +424,34 @@ struct WebAgentBridge::Impl : public std::enable_shared_from_this<WebAgentBridge
         });
     }
 
+    void handleLayerTree (const std::shared_ptr<Connection>& conn, const juce::var& id, const juce::var&)
+    {
+        // Dump the WKWebView's remote CALayer tree as text (macOS only; see
+        // LayerDebug.h) — the programmatic counterpart of the `layerdebug`
+        // overlays, so a client can census compositing layers without a
+        // screenshot. AppKit view walking must happen on the message thread.
+        std::weak_ptr<Impl>       weakSelf = shared_from_this();
+        std::weak_ptr<Connection> weakConn = conn;
+
+        juce::MessageManager::callAsync ([weakSelf, weakConn, id]()
+        {
+            auto self = weakSelf.lock();
+            if (! self || ! self->running.load()) return;
+
+            const auto text = detail::getCaLayerTreeAsText();
+            const bool ok = ! text.empty();
+
+            auto r = makeReply (id, "layertree", ok);
+            if (ok)
+                r->setProperty ("text", juce::String (juce::CharPointer_UTF8 (text.c_str())));
+            else
+                r->setProperty ("error", "no WKWebView found or SPI unavailable (non-mac backend?)");
+
+            if (auto c = weakConn.lock())
+                c->write (makeLine (juce::var (r.get())));
+        });
+    }
+
     void handleShot (const std::shared_ptr<Connection>& conn, const juce::var& id, const juce::var& msg)
     {
         const auto pathStr = msg.getProperty ("path", juce::var()).toString();
@@ -538,7 +566,7 @@ struct WebAgentBridge::Impl : public std::enable_shared_from_this<WebAgentBridge
     }
 };
 
-const WebAgentBridge::Impl::OpEntry WebAgentBridge::Impl::kOpTable[8] = {
+const WebAgentBridge::Impl::OpEntry WebAgentBridge::Impl::kOpTable[9] = {
     { "hello",       &Impl::handleHello      },
     { "ping",        &Impl::handlePing       },
     { "auth",        &Impl::handleAuth       },
@@ -546,6 +574,7 @@ const WebAgentBridge::Impl::OpEntry WebAgentBridge::Impl::kOpTable[8] = {
     { "bounds",      &Impl::handleBounds     },
     { "shot",        &Impl::handleShot       },
     { "layerdebug",  &Impl::handleLayerDebug },
+    { "layertree",   &Impl::handleLayerTree  },
     { "sink_replay", &Impl::handleSinkReplay },
 };
 

@@ -27,6 +27,8 @@
 
 #if WEB_AGENT_BRIDGE_ENABLED
 
+#include <string>
+
 namespace web_agent::detail
 {
 
@@ -34,6 +36,14 @@ namespace web_agent::detail
     app's windows. MUST be called on the message thread. Returns true if at
     least one WKWebView was found and the SPI selectors were available. */
 bool setCompositingDebugOverlays (bool enabled);
+
+/** Dump the first WKWebView's UI-process CALayer tree as text via the
+    `_caLayerTreeAsText` SPI (a machine-readable census of the remote layer
+    tree: one entry per compositing layer with geometry — the programmatic
+    counterpart of the visual overlays above). MUST be called on the message
+    thread. Returns an empty string when no WKWebView is found or the SPI is
+    unavailable (non-mac backend, renamed selector). */
+std::string getCaLayerTreeAsText();
 
 } // namespace web_agent::detail
 

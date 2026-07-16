@@ -671,6 +671,17 @@ class Page {
     return true;
   }
 
+  /** Dump the WKWebView's remote CALayer tree as text via the bridge
+      `layertree` op — the programmatic counterpart of layerDebug(): parse it
+      to census compositing layers (count, geometry) from a script instead of
+      reading overlay pixels off a screenshot. macOS-only; throws elsewhere. */
+  async layerTree() {
+    this.log('layertree');
+    const r = await this.session.request({ op: 'layertree' }, { timeoutMs: 10000 });
+    if (!r.ok) throw new Error(r.error || 'layertree unavailable');
+    return r.text;
+  }
+
   /** Native screenshot of the host window (incl. WebGL) via the bridge `shot` op.
       Writes a PNG host-side and returns its path. Pass { path } to choose where, and
       { clip: {x,y,w,h} } (CSS px) to crop to a UI region for a much smaller PNG. */

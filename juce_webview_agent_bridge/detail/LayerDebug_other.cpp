@@ -17,6 +17,11 @@ bool setCompositingDebugOverlays (bool)
     return false;
 }
 
+std::string getCaLayerTreeAsText()
+{
+    return {};
+}
+
 } // namespace web_agent::detail
 
 #endif

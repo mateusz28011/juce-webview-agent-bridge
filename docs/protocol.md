@@ -33,6 +33,7 @@ also carries `token` until the connection is authenticated.
 | `{"id","op":"ping"}` | `{"id","op":"ping","ok":true}` |
 | `{"id","op":"hello"}` | `{"id","op":"hello","ok",protocolVersion,ops[],platform,screenshotAvailable,authRequired}` |
 | `{"id","op":"layerdebug","enabled"?}` | `{"id","op":"layerdebug","ok",enabled,"error"?}` — toggles WebKit compositing debug overlays (layer borders + repaint counters) on every WKWebView via WKPreferences SPI; macOS only, Debug-only module. Overlays render into the window, so `shot` captures them. |
+| `{"id","op":"layertree"}` | `{"id","op":"layertree","ok","text"?,"error"?}` — dumps the first WKWebView's UI-process (remote) CALayer tree as text via the `_caLayerTreeAsText` SPI: a programmatic compositing-layer census (count + geometry) with no screenshot needed; macOS only. |
 | `{"id","op":"sink_replay","since"?}` | re-sends buffered `sink` frames with `seq` > `since`, then `{"id","op":"sink_replay","ok",count}` |
 
 ## Sink stream
