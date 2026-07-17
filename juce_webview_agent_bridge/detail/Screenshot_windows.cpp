@@ -14,6 +14,13 @@
 
 #if WEB_AGENT_BRIDGE_ENABLED && JUCE_WINDOWS
 
+// C++/WinRT pulls in coroutine support unconditionally, and under /std:c++17
+// that means <experimental/coroutine>, which recent MSVC STLs hard-error on.
+// Nothing here co_awaits — capture is driven by a blocking frame-pool handler —
+// so the header is incidental. Defining this ahead of the WinRT includes keeps
+// the module buildable at JUCE's C++17 floor rather than forcing C++20 on hosts.
+#define _SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS 1
+
 #include <d3d11.h>
 #include <dxgi1_2.h>
 #include <windows.graphics.capture.interop.h>
