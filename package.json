@@ -1,6 +1,6 @@
 {
   "name": "web-agent-bridge-client",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "CLI + protocol client for the juce_webview_agent_bridge debug WebView bridge (eval/console/network/click/fill/screenshot over a loopback socket, no CDP).",
   "type": "module",
   "bin": {
