@@ -1,4 +1,4 @@
-# juce_webview_agent_bridge
+# JUCE WebView Agent Bridge
 
 [![npm version](https://img.shields.io/npm/v/juce-webview-agent-bridge.svg)](https://www.npmjs.com/package/juce-webview-agent-bridge)
 [![tests](https://github.com/mateusz28011/juce-webview-agent-bridge/actions/workflows/tests.yml/badge.svg)](https://github.com/mateusz28011/juce-webview-agent-bridge/actions/workflows/tests.yml)
