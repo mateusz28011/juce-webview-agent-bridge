@@ -1,7 +1,20 @@
 {
   "name": "juce-webview-agent-bridge",
   "version": "0.3.1",
-  "description": "CLI + protocol client for the juce_webview_agent_bridge debug WebView bridge (eval/console/network/click/fill/screenshot over a loopback socket, no CDP).",
+  "description": "Typed, zero-dependency E2E client and CLI for driving live JUCE WebViews over a debug-only loopback bridge, without CDP.",
+  "keywords": [
+    "juce",
+    "webview",
+    "wkwebview",
+    "webview2",
+    "e2e",
+    "testing",
+    "playwright",
+    "agent",
+    "automation",
+    "debugging",
+    "mcp-alternative"
+  ],
   "type": "module",
   "types": "./tools/e2e.d.mts",
   "exports": {
@@ -31,6 +44,7 @@
   "files": [
     "tools/",
     "README.md",
+    "CHANGELOG.md",
     "LICENSE"
   ],
   "license": "MIT",
