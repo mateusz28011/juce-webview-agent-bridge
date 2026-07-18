@@ -75,11 +75,9 @@ version sites, commit, tag, create the GitHub Release, and publish the matching
 `juce-webview-agent-bridge` package to npm. It also refuses to release if `main`
 changed while the tests were running.
 
-The first npm publication needs an `NPM_TOKEN` repository secret because npm
-trusted publishing can only be configured after the package exists. After that
-first release, configure npm Trusted Publisher for this repository and
-`release.yml` (optionally restricted to the `npm` environment), then remove the
-long-lived secret; the workflow already requests `id-token: write` for OIDC.
+The npm package trusts this repository's `release.yml` workflow through npm
+Trusted Publishing. GitHub Actions authenticates with short-lived OIDC
+credentials, so the release does not use or require an npm access token.
 
 `npm run release [patch|minor|major|X.Y.Z]` remains the underlying maintainer
 script for recovery or a deliberate local release. Do not run it in parallel

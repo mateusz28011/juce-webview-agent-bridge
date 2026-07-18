@@ -37,8 +37,6 @@ jobs:
     permissions:
       contents: write
       id-token: write
-    env:
-      NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -55,7 +53,7 @@ jobs:
         with:
           node-version: 24
           registry-url: https://registry.npmjs.org
-          cache: npm
+          package-manager-cache: false
 
       - name: Use an npm CLI with trusted-publishing support
         run: npm install --global npm@^11.5.1
@@ -82,25 +80,12 @@ jobs:
         if: inputs.retry_version != ''
         run: npm ci --ignore-scripts
 
-      - name: Release GitHub and npm with bootstrap token
-        if: inputs.retry_version == '' && env.NPM_TOKEN != ''
-        run: npm run release -- "${{ inputs.bump }}"
-        env:
-          GH_TOKEN: ${{ github.token }}
-          NODE_AUTH_TOKEN: ${{ env.NPM_TOKEN }}
-
-      - name: Release GitHub and npm with trusted publishing
-        if: inputs.retry_version == '' && env.NPM_TOKEN == ''
+      - name: Release GitHub and npm
+        if: inputs.retry_version == ''
         run: npm run release -- "${{ inputs.bump }}"
         env:
           GH_TOKEN: ${{ github.token }}
 
-      - name: Retry npm publish with bootstrap token
-        if: inputs.retry_version != '' && env.NPM_TOKEN != ''
-        run: npm publish --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ env.NPM_TOKEN }}
-
-      - name: Retry npm publish with trusted publishing
-        if: inputs.retry_version != '' && env.NPM_TOKEN == ''
+      - name: Retry npm publish
+        if: inputs.retry_version != ''
         run: npm publish --access public
