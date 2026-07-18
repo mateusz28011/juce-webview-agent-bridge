@@ -1,6 +1,10 @@
 # juce_webview_agent_bridge
 
+[![npm version](https://img.shields.io/npm/v/juce-webview-agent-bridge.svg)](https://www.npmjs.com/package/juce-webview-agent-bridge)
 [![tests](https://github.com/mateusz28011/juce-webview-agent-bridge/actions/workflows/tests.yml/badge.svg)](https://github.com/mateusz28011/juce-webview-agent-bridge/actions/workflows/tests.yml)
+[![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
+![JUCE WebView plugin connected to an agent and E2E tests](https://raw.githubusercontent.com/mateusz28011/juce-webview-agent-bridge/main/docs/social-preview.png)
 
 A **debug-only** JUCE module that lets an external agent (or script) drive a live
 `juce::WebBrowserComponent` over a loopback TCP socket — a "mini-CDP" giving you a
@@ -70,7 +74,7 @@ inspection remains macOS-only. Linux real-app reports and fixes are very welcome
 ## Install
 
 **Requirements:** JUCE 8, C++17, a `juce::WebBrowserComponent`-based UI; the
-clients need Node ≥ 18 (zero runtime dependencies).
+clients need Node ≥ 22 (zero runtime dependencies).
 
 It's a standard JUCE module. Get the repo — as a submodule:
 
@@ -201,7 +205,7 @@ Both suites live in `tests/` and run **independently of any host app**, so they
 keep working after this module is extracted into its own repo.
 
 ```bash
-# JS client — zero dependencies, Node >= 18
+# JS client — zero dependencies, Node >= 22
 npm test                     # or: node --test tests/*.test.mjs
 
 # Maintainer build — strict TypeScript source -> committed .mjs + .d.mts

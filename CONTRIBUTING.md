@@ -13,7 +13,7 @@ Windows/WebView2 configurations).
   wrappers over `backend` / `fireBackend` / `readBig` (see the README's
   "Agnostic by design" note).
 - **Zero third-party client dependencies.** Generated `tools/*.mjs` must keep working with
-  nothing but Node ≥ 18 built-ins — no npm packages. Facts both clients share
+  nothing but Node ≥ 22 built-ins — no npm packages. Facts both clients share
   (discovery, NDJSON framing, the default port) live once in `src/shared.mts`;
   don't re-copy them into a client. Edit `src/`, then run `npm run build`; never
   hand-edit the generated `.mjs`/`.d.mts` files under `tools/`.
@@ -43,7 +43,7 @@ ctest --test-dir build/test --output-on-failure
 ```
 
 Please run both before opening a PR. CI (`.github/workflows/tests.yml`) runs the
-JS suites on Node 18/22 and the C++ suite on macOS, Windows, and Linux — all
+JS suites on Node 22/24 and the C++ suite on macOS, Windows, and Linux — all
 required. (Live-app usage on Linux is still unverified — see the README's
 **Status** table — but the suites gate every change.)
 

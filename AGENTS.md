@@ -43,15 +43,20 @@ npm run release [patch|minor|major|X.Y.Z]       # recovery/local; normal release
 ```
 
 Run BOTH suites before claiming a change works. CI (`.github/workflows/tests.yml`)
-mirrors them and gates on all of it: JS on Node 18/22, C++ on macOS + Windows +
+mirrors them and gates on all of it: JS on Node 22/24, C++ on macOS + Windows +
 Linux.
 
 ## Hard rules
 
+- **No repository publication without explicit approval.** Do not commit, push,
+  create or move tags, edit GitHub Releases, trigger a release workflow, or
+  publish to npm unless the user has explicitly approved that exact action.
+  A request to prepare or edit files is not approval to commit them. Show the
+  resulting diff/status and wait for approval.
 - **App-agnostic.** No specific app's selectors, native-function names, or page
   globals anywhere in the module or `src/`. Host projects build their own thin
   wrappers over `backend`/`fireBackend`/`readBig`.
-- **Zero third-party client dependencies.** Generated `tools/*.mjs` run on bare Node ≥ 18
+- **Zero third-party client dependencies.** Generated `tools/*.mjs` run on bare Node ≥ 22
   built-ins. Cross-client facts (discovery, NDJSON framing, default port) have
   ONE owner: `src/shared.mts` — never re-copy them into a client. TypeScript and
   `@types/node` are development-only. Never edit generated `tools/*` by hand.
@@ -67,6 +72,51 @@ Linux.
   serialized against close via `writeMutex`. Preserve these invariants.
 - **Version lives in 5 places** (package.json, package-lock.json, module declaration,
   tests CMake, README `GIT_TAG` pin) — never bump by hand; `scripts/release.sh` is the owner.
+
+## Changelog and releases
+
+### During normal development
+
+- Record user-visible changes in `CHANGELOG.md` under `[Unreleased]` as part of
+  the same work. Use `Added`, `Changed`, `Fixed`, `Removed`, or `Security` only
+  when the category is needed.
+- Describe behavior and compatibility from the user's perspective. Do not dump
+  commit subjects, internal recovery steps, routine CI maintenance, or marketing
+  copy into the changelog.
+- Keep entries concise and group related implementation commits into one item.
+- Documentation-only and release-infrastructure changes belong in the changelog
+  only when they materially affect installation, compatibility, security, or the
+  release process visible to maintainers.
+
+### Preparing a release
+
+1. Ask for explicit approval of the exact target version and release action.
+   Never infer approval from a request to prepare release files.
+2. Move the relevant `[Unreleased]` entries to
+   `## [X.Y.Z] - YYYY-MM-DD`, restore an empty `[Unreleased]` section, and update
+   the comparison links at the bottom of `CHANGELOG.md`.
+3. Run the Node build, JS tests, public type fixture, npm pack dry-run, and the
+   standalone C++ suite. Do not release with a failing or skipped required suite.
+4. Use the manual `.github/workflows/release.yml` workflow for normal releases.
+   Choose `patch`, `minor`, or `major`; `scripts/release.sh` owns all five version
+   sites and must not be replaced with hand-edited version bumps.
+5. Do not push unrelated changes while the release workflow is running. Its
+   publish job intentionally refuses to release if `main` moved after testing.
+
+### Release notes and verification
+
+- Keep the GitHub Release title exactly `vX.Y.Z`. Its body should mirror the
+  released changelog section in a shorter form and end with the full comparison
+  link. Avoid slogans and generic descriptions such as "typed npm client and
+  automated releases".
+- npm publishing uses Trusted Publishing (OIDC) from the `npm` environment. Do
+  not add an `NPM_TOKEN` or `NODE_AUTH_TOKEN` publishing fallback.
+- If GitHub/tag creation succeeds but npm publishing fails, use the workflow's
+  `retry_version` input for that existing version. Never create a replacement tag
+  or bump again merely to retry npm.
+- After success, verify the Actions run, GitHub Release/tag, `npm view` version
+  and package metadata, and the npm provenance attestation. Then fast-forward the
+  local `main` to the release commit and confirm the working tree is clean.
 
 ## Gotchas
 

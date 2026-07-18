@@ -10,7 +10,7 @@ Drive the **real** embedded WebView of a running native app over a loopback JSON
 Client: prefer the project's installed npm package (`npx juce-webview-agent-bridge <cmd>`), or run
 `node <path-to>/tools/web-agent.mjs <cmd>` from a checkout of
 [juce-webview-agent-bridge](https://github.com/mateusz28011/juce-webview-agent-bridge).
-The published client has zero runtime dependencies and requires Node ≥ 18.
+The published client has zero runtime dependencies and requires Node ≥ 22.
 
 ## Connecting
 

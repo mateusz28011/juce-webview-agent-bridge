@@ -53,7 +53,7 @@
     "url": "git+https://github.com/mateusz28011/juce-webview-agent-bridge.git"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=22"
   },
   "publishConfig": {
     "access": "public"

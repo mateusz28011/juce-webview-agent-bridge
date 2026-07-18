@@ -3,7 +3,7 @@
  * bridge discovery and NDJSON wire framing. Single source of truth — the two
  * clients used to carry private copies of this logic, and the copies drifted
  * (the fill focus fix landed in one and not the other), so it now lives here.
- * Still zero third-party dependencies: bare Node >= 18 built-ins only.
+ * Still zero third-party dependencies: bare Node >= 22 built-ins only.
  */
 
 import fs from 'node:fs';

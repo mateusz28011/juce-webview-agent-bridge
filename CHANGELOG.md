@@ -5,9 +5,18 @@ commit comparisons are available from the linked GitHub Releases.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-07-18
+
+### Added
+
+- Added a maintained project changelog and repository social preview.
+
 ### Changed
 
 - Improved the npm package description and search keywords.
+- Raised the supported Node.js floor from the end-of-life Node 18 to Node 22;
+  CI now covers the supported Node 22 and 24 LTS lines.
+- Added npm version and license badges to the README.
 
 ## [0.3.1] - 2026-07-18
 
@@ -73,7 +82,8 @@ There are no package API changes in this release.
 - Zero-dependency CLI, Playwright-shaped E2E client, agent skill, and standalone
   JavaScript and C++ test suites.
 
-[Unreleased]: https://github.com/mateusz28011/juce-webview-agent-bridge/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/mateusz28011/juce-webview-agent-bridge/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/mateusz28011/juce-webview-agent-bridge/releases/tag/v0.4.0
 [0.3.1]: https://github.com/mateusz28011/juce-webview-agent-bridge/releases/tag/v0.3.1
 [0.3.0]: https://github.com/mateusz28011/juce-webview-agent-bridge/releases/tag/v0.3.0
 [0.2.2]: https://github.com/mateusz28011/juce-webview-agent-bridge/releases/tag/v0.2.2
