@@ -32,43 +32,24 @@ verified against the home project's real Debug standalone. See **Status** below.
 
 ## Why
 
-This module exists because of one problem: **a heavy WebView UI you can't see
-into.** Its home project — *Better Message Mycelia*, a JUCE MIDI sequencer with a
-dense React + PixiJS/WebGL plugin UI — needed optimizing, and an AI coding agent
-can't optimize what it can't observe: no CDP, WebGL renders black in snapshots,
-and a dev-server copy in a browser lies about native state and timing. The bridge
-turned the *running plugin* into something an agent can read, drive, and measure —
-and that unlocked AI for the hard part of the work. The same plumbing then turned
-out to be exactly what live e2e tests need.
+This started in *Better Message Mycelia*, a JUCE app with a dense React +
+PixiJS/WebGL plugin UI. A browser copy could not reproduce native state or timing,
+WKWebView had no CDP, and in-page screenshots missed GPU content. The bridge made
+the running plugin observable and controllable, which enabled:
 
-What that looks like in practice, daily, in the same project:
-
-- **Agent debugging** — Claude Code (via the bundled skill) reads real engine state
-  over `backend()`, clicks the actual UI, and verifies fixes with WebGL-true
-  screenshots.
-- **Live e2e suites** — `node:test` drives real knobs, piano-roll gestures, preset
-  loads and MIDI injection, asserting on the DOM *and* the C++ engine.
-- **Performance forensics** — the render-perf probe and event stream pinned real
-  bugs invisible from outside: an LFO playhead stutter (rAF gap percentiles), a
-  dead 60 Hz push-timer masquerading as a "preset timeout" toast, and a ~40 ms
-  per-click hitch traced to one inherited-CSS style write.
+- agent debugging against the real UI and C++ engine;
+- live e2e tests for controls, presets and native state;
+- performance probes using event streams and rAF frame-gap measurements.
 
 ### Why not just Playwright?
 
-Because Playwright can't attach to a shipping app's embedded WebView. Its only
-attach paths are an opt-in WebView2 CDP endpoint (Windows, Debug-only, off by
-default) and its own bundled browsers — it has **no** path to a WKWebView, which
-exposes no CDP at all. So for a JUCE app that didn't build in remote debugging,
-Playwright has nowhere to connect. This bridge rides the `evaluateJavascript` +
-native-function surface JUCE already provides, so it works on both — and it does
-two things no browser-automation tool can: **screenshot GPU-composited WebGL**
-(in-WebView snapshots render it black) and **assert on real native C++ state**
-(`backend()`), not just the DOM.
+Playwright cannot attach to WKWebView and needs an explicitly enabled CDP endpoint
+for WebView2. This bridge instead uses JUCE's existing `evaluateJavascript` and
+native-function surfaces. It can also capture compositor-rendered WebGL and assert
+on real C++ state through `backend()`.
 
-It is **not** a Playwright replacement: Playwright wins on trusted input
-(`isTrusted=true`), network interception/mocking, multiple engines, and multi-page.
-The bridge's input is synthetic and its network is observe-only. Different jobs —
-and you can even keep Playwright's *test harness* while driving through the bridge,
+It is not a Playwright replacement: input is synthetic, network is observe-only,
+and there is one page. You can still use the `@playwright/test` runner as a harness;
 see [`examples/playwright-test`](examples/playwright-test).
 
 ## Status — what's actually been exercised
@@ -89,7 +70,7 @@ inspection remains macOS-only. Linux real-app reports and fixes are very welcome
 ## Install
 
 **Requirements:** JUCE 8, C++17, a `juce::WebBrowserComponent`-based UI; the
-clients need Node ≥ 18 (zero npm dependencies).
+clients need Node ≥ 18 (zero runtime dependencies).
 
 It's a standard JUCE module. Get the repo — as a submodule:
 
@@ -97,7 +78,8 @@ It's a standard JUCE module. Get the repo — as a submodule:
 git submodule add https://github.com/mateusz28011/juce-webview-agent-bridge.git modules/juce-webview-agent-bridge
 ```
 
-or with CMake `FetchContent`:
+or with CMake `FetchContent` (after JUCE has been added, so
+`juce_add_module` is available):
 
 ```cmake
 include(FetchContent)
@@ -111,9 +93,20 @@ The module itself lives in the `juce_webview_agent_bridge/` subdirectory (JUCE r
 module directory to be named exactly like the module ID). Register and link it:
 
 ```cmake
+# Submodule/manual checkout:
 juce_add_module(path/to/juce-webview-agent-bridge/juce_webview_agent_bridge)
-# FetchContent variant: juce_add_module(${juce_webview_agent_bridge_SOURCE_DIR}/juce_webview_agent_bridge)
+
+# FetchContent_MakeAvailable registers the module through the repo's root CMakeLists.
 target_link_libraries(MyPlugin PRIVATE juce_webview_agent_bridge)
+```
+
+Install the zero-runtime-dependency Node client separately in the project that
+owns your e2e tests. The npm package is independent of how the C++ module was
+fetched and includes strict TypeScript declarations:
+
+```bash
+npm install --save-dev juce-webview-agent-bridge
+npx juce-webview-agent-bridge ping
 ```
 
 ## Integrate (3 steps)
@@ -148,97 +141,39 @@ npx skills add mateusz28011/juce-webview-agent-bridge
 
 ## CLI client
 
+With the npm package installed, use `npx juce-webview-agent-bridge`. A checkout can run the committed
+`tools/web-agent.mjs` build directly without installing dependencies:
+
 ```bash
-tools/web-agent.mjs ping
-tools/web-agent.mjs eval "document.title"
-tools/web-agent.mjs logs                     # live console + network stream
-tools/web-agent.mjs logs --backlog           # recent history first, then live
-tools/web-agent.mjs capture on               # also capture request+response bodies/headers, WS/SSE frames, beacon payloads
-tools/web-agent.mjs dom "#root > div"
-tools/web-agent.mjs click "button.play"
-tools/web-agent.mjs fill "input[name=bpm]" 128
-tools/web-agent.mjs shot /tmp/ui.png         # native compositor shot of the host window
-tools/web-agent.mjs shot /tmp/panel.png "#panel"  # …cropped to an element's rect (smaller PNG)
-# options: --port <n>, --host <h>, --token <t> — but the client auto-discovers
-# port + token from ~/.web_agent_bridge.json, so usually none are needed.
+npx juce-webview-agent-bridge ping
+npx juce-webview-agent-bridge eval "document.title"
+npx juce-webview-agent-bridge logs                     # live console + network stream
+npx juce-webview-agent-bridge shot /tmp/ui.png         # native compositor shot of the host window
+npx juce-webview-agent-bridge shot /tmp/panel.png "#panel"  # crop to an element
 ```
+
+Other commands: `hello`, `dom`, `click`, `fill`, `capture`, `backlog`,
+`layerdebug`, and `layertree`. Port and token are normally auto-discovered.
 
 ## E2E (Playwright-style)
 
-`tools/e2e.mjs` is a small Playwright-shaped client built on the `eval` op. There is
-no CDP/WebDriver for an embedded WebView, so the auto-wait/retry loop runs
-**client-side** — you still get locators + actionability gating on the *live* WebView:
+The package root exports a Playwright-shaped client with client-side auto-waiting:
 
 ```js
-import { connect, expect } from './tools/e2e.mjs';
+import { connect, expect } from 'juce-webview-agent-bridge';
 
-const page = await connect();                        // auto-discovers port + token
-await page.locator('text=Save').click();             // waits for visible+stable+enabled+hit
-await page.getByTestId('email').fill('a@b.c');
-await expect(page.locator('role=button[name="Submit"]')).toBeVisible();
-await expect(page.locator('.row')).toHaveCount(8);
+const page = await connect({ activate: 'My App' });
+await page.getByTestId('patch-name').fill('warm pad', { enter: true });
+await page.locator('text=Save').click();
+await expect(page.locator('.patch-row')).toHaveCount(1);
+await expect.poll(() => page.backend('getPatchCount')).toBe(1);
 page.close();
 ```
 
-**As an e2e test suite (not just an interactive agent).** The same client slots
-straight into `node:test` — this is how the module's home project runs live e2e
-against its real plugin. The one structural difference from Playwright: the suite
-drives an app that is *already running* (a Debug build with the bridge), so make
-it self-skip when no bridge is up instead of failing:
-
-```js
-import { test, after } from 'node:test';
-import { connect, expect } from './tools/e2e.mjs';
-
-const page = await connect({ activate: 'My App' }).catch(() => null);
-
-test('saving a patch updates the list', { skip: !page && 'bridge not running' }, async () => {
-  await page.getByTestId('patch-name').fill('warm pad', { enter: true });
-  await page.locator('text=Save').click();
-  await expect(page.locator('.patch-row')).toHaveCount(1);
-  await expect.poll(() => page.backend('getPatchCount')).toBe(1); // assert on the ENGINE, not just the DOM
-});
-
-after(() => page?.close());
-```
-
-What you trade vs a browser-driven e2e stack: no native dialogs/file pickers, no
-request interception, single page, and the app must be launched first. What you
-get that no CDP stack can offer on an embedded WebView: the *real* native bridge
-and engine state in your assertions (`backend()` / `expect.poll`), the live
-console/network stream (`waitForResponse`), and WebGL-true screenshots.
-
-Prefer the `@playwright/test` runner (its reporter, retries, parallel workers)?
-Keep it as the *harness* and drive through the bridge — a ready-to-copy fixture is
-in [`examples/playwright-test`](examples/playwright-test). It adds no dependency to
-this module.
-
-- **Selectors:** `css` (default), `text=<exact text>`, `role=<role>[name="<accessible name>"]`.
-- **Page:** `locator`, `getByTestId`, `evaluate(code)`, `readBig(expr)` (chunked read for
-  large values — see docs/e2e.md), `ariaSnapshot()` (compact role/name accessibility tree —
-  far cheaper to read back than `outerHTML`), `screenshot({path, clip})` (native, incl. WebGL — via the
-  `shot` op; `clip: {x,y,w,h}` in CSS px crops to a region, macOS/Windows), `waitForFunction(expr)`,
-  `poll(expr, pred)` / `pollStable(expr)` (settle primitives — see docs/e2e.md),
-  `measureRenderPerf({durationMs, motionSelector})` (main-thread jank probe — see docs/e2e.md),
-  `capabilities()` (the `hello` handshake), the live event stream (`on` / `waitForEvent` /
-  `waitForResponse` / `replayEvents` — see docs/e2e.md), and
-  `backend` / `fireBackend` (JUCE hosts only).
-- **Locator:** `click`, `dblclick`, `hover`, `fill`, `type`, `press(key)`,
-  `selectOption(value)`, `check` / `uncheck`, `focus`, `screenshot({path})` (crops to the
-  element's box — a small PNG), `ariaSnapshot()` (subtree role/name tree), `drag({dx,dy})`,
-  `textContent`, `getAttribute`, `count`,
-  `isVisible`, `waitFor({state})`, `nth(i)` / `first()`.
-- **`expect(locator)`:** `toBeVisible` / `toBeHidden` / `toBeEnabled` / `toBeDisabled` /
-  `toBeChecked` / `toHaveText` / `toContainText` / `toHaveValue` / `toHaveCount`, each also
-  available as `expect(locator).not.*` (all auto-retry until the timeout).
-- **`expect.poll(fn, {timeout})`:** value-level polling assertion (escape hatch for app
-  state, esp. over `backend()`): `await expect.poll(() => page.backend('getBpm')).toBe(128)`.
-  Matchers: `toBe` / `toEqual` / `toBeTruthy` / `toBeFalsy` / `toContain` /
-  `toBeGreaterThan(OrEqual)` / `toBeLessThan(OrEqual)` / `toSatisfy`, plus `.not`.
-
-Operational details — live event waits, real drags, settle primitives, the
-render-perf probe, the action log, large-value reads, JUCE native functions, and
-backgrounded-host handling — are in [docs/e2e.md](docs/e2e.md).
+The client includes CSS/text/role locators, click/fill/type/drag actions,
+auto-retrying assertions, accessibility snapshots, native screenshots, live
+console/network/error events, large-value reads, render-performance probes and
+JUCE native calls. Full API and operational guidance: [docs/e2e.md](docs/e2e.md).
 
 ## Discovery & auth
 
@@ -252,24 +187,9 @@ sink-frame format, and discovery details are in [docs/protocol.md](docs/protocol
 
 ## Known limits
 
-- **Screenshot** is captured natively by the host through the window compositor
-  (macOS: ScreenCaptureKit, **macOS 14+**; Windows 11:
-  `Windows.Graphics.Capture` + D3D11), so GPU-composited
-  WebGL/canvas is included — unlike `WKWebView.takeSnapshot`, which returns black
-  for hardware-accelerated content ([WebKit #198107](https://bugs.webkit.org/show_bug.cgi?id=198107)).
-  On macOS, the **host app** needs Screen Recording permission (one-time TCC prompt
-  on first `shot`) — and on Debug builds the grant is keyed to your code signature, so an
-  ad-hoc-signed app loses it on every rebuild; the fix (a stable self-signed
-  identity) and the `-3801` error explained:
-  [docs/screen-recording.md](docs/screen-recording.md). A `rect` (CSS px) crops to
-  a UI region host-side — the host owns the geometry (per-window DPI, title bar,
-  client-area offset, clamp), so the client just passes an element's
-  `getBoundingClientRect()`. On Windows the bridge falls back from a hardware D3D11
-  device to WARP and treats optional cursor/border suppression as best-effort, so it
-  does not depend on a particular GPU or Windows 11 revision. The target window must
-  still be capturable by the desktop compositor; minimized/headless windows may time
-  out. **Linux capture remains a TODO** (XComposite). The `bounds` op remains
-  available for client-side capture fallbacks.
+- Native screenshots require macOS 14+ or Windows 11 and a compositor-capturable,
+  non-minimized window. macOS permission/signing setup is in
+  [docs/screen-recording.md](docs/screen-recording.md). Linux capture is a TODO.
 - **Synthetic input** dispatched from JS has `isTrusted === false`, so APIs gated
   behind a user gesture (file pickers, some clipboard/fullscreen) are out of reach.
 - **eval errors** are only reported on WKWebView; on WebView2 a failed eval looks
@@ -284,6 +204,11 @@ keep working after this module is extracted into its own repo.
 # JS client — zero dependencies, Node >= 18
 npm test                     # or: node --test tests/*.test.mjs
 
+# Maintainer build — strict TypeScript source -> committed .mjs + .d.mts
+npm ci --ignore-scripts
+npm run build
+npm run test:types
+
 # C++ bridge — fetches JUCE + Catch2 on first configure
 cmake -S tests -B build/test
 cmake --build build/test
@@ -293,14 +218,8 @@ ctest --test-dir build/test --output-on-failure
 cmake -S tests -B build/test -DWAB_JUCE_DIR=/path/to/JUCE
 ```
 
-The C++ tests drive the real loopback server (discovery, auth gate, eval/bounds
-dispatch, sink fan-out, port scan, fail-open) over a socket; `start()` takes an
-optional discovery-file path so a test (or a multi-instance host) can avoid the
-shared `~/.web_agent_bridge.json`. The JS tests run the real CLI against an
-in-process mock bridge. To run the C++ tests inside a host that already has a
-Catch2 target, add `tests/Test_WebAgentBridge.cpp` to it and link
-`juce_webview_agent_bridge` (the host must define `JUCE_MODAL_LOOPS_PERMITTED=1` so the
-message loop can be pumped for the eval/bounds cases).
+The JS tests drive the real clients against a mock bridge; the C++ suite drives
+the real loopback server. Neither requires a host app.
 
 ## Contributing
 

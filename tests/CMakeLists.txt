@@ -16,11 +16,6 @@
 cmake_minimum_required(VERSION 3.22)
 project(web_agent_bridge_tests VERSION 0.2.2 LANGUAGES C CXX)
 
-# The module under test is the juce_webview_agent_bridge/ dir next to tests/ (JUCE
-# requires the module directory to be named exactly like the module ID, so it
-# is nested inside the repo rather than being the repo root).
-get_filename_component(WAB_MODULE_DIR "${CMAKE_CURRENT_LIST_DIR}/../juce_webview_agent_bridge" ABSOLUTE)
-
 include(FetchContent)
 
 # --- JUCE (reuse a local checkout if given, else fetch) -----------------------
@@ -45,7 +40,9 @@ FetchContent_Declare(Catch2
 FetchContent_MakeAvailable(Catch2)
 
 # --- the module under test ----------------------------------------------------
-juce_add_module("${WAB_MODULE_DIR}")
+# Exercise the same root CMakeLists used by consumer FetchContent_MakeAvailable,
+# rather than bypassing it with a test-only direct juce_add_module call.
+add_subdirectory("${CMAKE_CURRENT_LIST_DIR}/.." "${CMAKE_BINARY_DIR}/wab-module")
 
 # --- test runner --------------------------------------------------------------
 juce_add_console_app(web_agent_bridge_tests PRODUCT_NAME "web_agent_bridge_tests")

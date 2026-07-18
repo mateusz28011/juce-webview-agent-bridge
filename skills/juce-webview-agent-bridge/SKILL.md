@@ -1,13 +1,16 @@
 ---
 name: juce-webview-agent-bridge
-description: Drive a live embedded WebView from outside via the web-agent bridge (juce_webview_agent_bridge) — eval JS, stream console/network, click/fill, screenshot (incl. WebGL) on the real running app, no CDP. Use when inspecting or driving a running app's embedded web UI, the juce_webview_agent_bridge module, web-agent.mjs, or e2e.mjs.
+description: Drive a live embedded WebView from outside via juce_webview_agent_bridge — eval JS, stream console/network, click/fill, screenshot (incl. WebGL) on the real running app, no CDP. Use when inspecting or driving a running app's embedded web UI, the juce_webview_agent_bridge module, web-agent.mjs, or e2e.mjs.
 ---
 
 # juce webview agent bridge
 
 Drive the **real** embedded WebView of a running native app over a loopback JSON socket — the live runtime (native bridge, real state), not a dev-server copy in a separate browser. Works on WKWebView and WebView2 (no CDP). The app must embed the `juce_webview_agent_bridge` JUCE module (Debug builds only).
 
-Client: `node <path-to>/tools/web-agent.mjs <cmd>` — find it in the project that embeds the module (glob `**/*agent*bridge*/**/tools/web-agent.mjs`), or clone [juce-webview-agent-bridge](https://github.com/mateusz28011/juce-webview-agent-bridge). Zero npm dependencies, Node ≥ 18.
+Client: prefer the project's installed npm package (`npx juce-webview-agent-bridge <cmd>`), or run
+`node <path-to>/tools/web-agent.mjs <cmd>` from a checkout of
+[juce-webview-agent-bridge](https://github.com/mateusz28011/juce-webview-agent-bridge).
+The published client has zero runtime dependencies and requires Node ≥ 18.
 
 ## Connecting
 
@@ -33,7 +36,7 @@ The client auto-discovers port + session token from `~/.web_agent_bridge.json` (
 For DOM-driving with auto-wait instead of raw `eval`, use `e2e.mjs` (sibling of `web-agent.mjs`):
 
 ```js
-import { connect, expect } from '<path-to>/tools/e2e.mjs';
+import { connect, expect } from 'juce-webview-agent-bridge';
 const page = await connect();                  // same auto-discovery (port + token)
 await page.getByTestId('save').click();        // waits visible+stable+enabled+hit
 await expect(page.locator('text=Done')).toBeVisible();

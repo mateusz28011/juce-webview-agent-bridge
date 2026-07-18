@@ -12,7 +12,7 @@ folder is the only place `@playwright/test` appears.
 ## Run it
 
 ```bash
-npm i -D @playwright/test            # your harness, not the module's
+npm i -D @playwright/test juce-webview-agent-bridge
 # ...launch your Debug host app (with the bridge) first...
 APP_NAME="My App" npx playwright test --config examples/playwright-test/playwright.config.mjs
 ```

@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_call:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -23,6 +24,13 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
       - run: npm test
+      - name: Build and type-check the published client
+        if: matrix.node == 22
+        run: |
+          npm ci --ignore-scripts
+          npm run build
+          git diff --exit-code -- tools/
+          npm run test:types
 
   # C++ bridge suite against a real loopback server, on all three platforms.
   # All required: the suite went green on Windows/Linux in CI run 2, so those

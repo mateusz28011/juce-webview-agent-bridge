@@ -6,4 +6,3 @@ node_modules/
 # @playwright/test harness artifacts (examples/playwright-test)
 test-results/
 playwright-report/
-package-lock.json

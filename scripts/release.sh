@@ -2,10 +2,12 @@
 # release.sh — release helper for juce-webview-agent-bridge (GitHub edition).
 #
 # Bumps the ONE module version everywhere it lives, commits it as
-# `chore(release): vX.Y.Z`, tags an ANNOTATED `vX.Y.Z`, and pushes main + the
-# exact tag atomically. Version sites kept in sync (package.json is the source
+# `chore(release): vX.Y.Z`, tags an ANNOTATED `vX.Y.Z`, pushes main + the
+# exact tag atomically, creates the GitHub Release, and publishes npm. Version
+# sites kept in sync (package.json is the source
 # the bump reads from):
 #   - package.json                                "version"
+#   - package-lock.json                           root/package versions
 #   - juce_webview_agent_bridge/juce_webview_agent_bridge.h         JUCE module declaration `version:`
 #   - tests/CMakeLists.txt                        project(... VERSION X.Y.Z ...)
 #   - README.md                                   FetchContent GIT_TAG pin
@@ -40,7 +42,6 @@ if [[ -n "$(git status --porcelain)" ]]; then
   git status --short >&2
   exit 1
 fi
-
 # --- compute the new version ----------------------------------------------------
 current="$(node -p "require('./package.json').version")"
 bump="${1:-}"
@@ -70,6 +71,10 @@ node -e "
   const p = JSON.parse(fs.readFileSync('package.json', 'utf8'));
   p.version = '${new}';
   fs.writeFileSync('package.json', JSON.stringify(p, null, 2) + '\n');
+  const lock = JSON.parse(fs.readFileSync('package-lock.json', 'utf8'));
+  lock.version = '${new}';
+  lock.packages[''].version = '${new}';
+  fs.writeFileSync('package-lock.json', JSON.stringify(lock, null, 2) + '\n');
 "
 sed -i.bak -E "s|^(   version: +)[0-9]+\.[0-9]+\.[0-9]+$|\1${new}|" juce_webview_agent_bridge/juce_webview_agent_bridge.h
 sed -i.bak -E "s|(project\(web_agent_bridge_tests VERSION )[0-9]+\.[0-9]+\.[0-9]+|\1${new}|" tests/CMakeLists.txt
@@ -80,10 +85,15 @@ rm -f juce_webview_agent_bridge/juce_webview_agent_bridge.h.bak tests/CMakeLists
 grep -q "version:            ${new}" juce_webview_agent_bridge/juce_webview_agent_bridge.h
 grep -q "VERSION ${new}" tests/CMakeLists.txt
 grep -q "GIT_TAG        ${tag}" README.md
+node -e "const p=require('./package-lock.json'); if(p.version!=='${new}' || p.packages[''].version!=='${new}') process.exit(1)"
 
 # --- verify, commit, tag ----------------------------------------------------------
+npm ci --ignore-scripts >/dev/null 2>&1
+npm run build >/dev/null 2>&1 || { echo '✗ TypeScript build failed — aborting (tree left bumped for inspection).' >&2; exit 1; }
 npm test >/dev/null 2>&1 || { echo '✗ npm test failed — aborting (tree left bumped for inspection).' >&2; exit 1; }
-git add package.json juce_webview_agent_bridge/juce_webview_agent_bridge.h tests/CMakeLists.txt README.md
+npm run test:types >/dev/null 2>&1 || { echo '✗ public TypeScript API check failed — aborting (tree left bumped for inspection).' >&2; exit 1; }
+npm pack --dry-run >/dev/null 2>&1 || { echo '✗ npm package dry-run failed — aborting (tree left bumped for inspection).' >&2; exit 1; }
+git add package.json package-lock.json juce_webview_agent_bridge/juce_webview_agent_bridge.h tests/CMakeLists.txt README.md tools
 git commit -m "chore(release): ${tag}"
 git tag -a "${tag}" -m "${tag}"
 [[ "$(git cat-file -t "${tag}")" == "tag" ]] || { echo "✗ ${tag} is not annotated." >&2; exit 1; }
@@ -96,10 +106,18 @@ if ! git remote get-url origin >/dev/null 2>&1; then
   exit 0
 fi
 git push --atomic origin main "${tag}"
-# Best-effort: the push already succeeded, so a gh/network hiccup must not fail the release.
 if command -v gh >/dev/null 2>&1; then
-  gh release create "${tag}" --generate-notes || echo "⚠ GitHub Release failed — retry: gh release create ${tag} --generate-notes" >&2
+  if ! gh release create "${tag}" --generate-notes; then
+    echo "⚠ Tag was pushed but GitHub Release failed — retry that command, then run: npm publish --access public" >&2
+    exit 1
+  fi
 else
-  echo "▸ Pushed. Install 'gh' (or create the GitHub Release by hand) for release notes."
+  echo "⚠ Tag was pushed, but 'gh' is required before npm publication." >&2
+  echo "  Create the GitHub Release, then run: npm publish --access public" >&2
+  exit 1
 fi
-echo "✓ Released ${tag}"
+if ! npm publish --access public; then
+  echo "⚠ GitHub release succeeded but npm publish failed — retry: npm publish --access public" >&2
+  exit 1
+fi
+echo "✓ Released ${tag} to GitHub and npm"

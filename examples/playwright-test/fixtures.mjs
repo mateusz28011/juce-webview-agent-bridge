@@ -7,12 +7,12 @@
  * the driver. This fixture hands each test a bridge `page` instead of a Playwright
  * browser page; tests that only use `app` never launch a browser.
  *
- * Bring your own harness: `npm i -D @playwright/test`. This example adds no
- * dependency to the module itself.
+ * Bring your own harness: `npm i -D @playwright/test juce-webview-agent-bridge`.
+ * The bridge package itself still has zero runtime dependencies.
  */
 import { test as base } from '@playwright/test';
 
-import { connect } from '../../tools/e2e.mjs';
+import { connect } from 'juce-webview-agent-bridge';
 
 export const test = base.extend({
   // Per-test bridge connection to the already-running host app. Named `app` (not
@@ -32,4 +32,4 @@ export const test = base.extend({
 
 // The bridge ships its own auto-retrying expect (locator + value assertions);
 // re-export it so specs import everything from one place.
-export { expect } from '../../tools/e2e.mjs';
+export { expect } from 'juce-webview-agent-bridge';

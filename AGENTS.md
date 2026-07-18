@@ -18,11 +18,14 @@ limits, screenshot/TCC setup) — this file is the working map.
   - `detail/Screenshot_mac.mm` / `Screenshot_windows.cpp` — native window capture
     (ScreenCaptureKit on macOS 14+; Windows.Graphics.Capture + D3D11 on Windows 11).
     `Screenshot_other.cpp` is the unsupported-platform stub.
-- `tools/web-agent.mjs` — one-shot CLI (`ping|hello|eval|dom|click|fill|capture|
+- `src/*.mts` — strict TypeScript source of truth for both Node clients and their
+  shared transport. `npm run build` emits the committed, zero-runtime-dependency
+  `.mjs` clients and `.d.mts` declarations under `tools/`.
+- `tools/web-agent.mjs` — generated one-shot CLI (`ping|hello|eval|dom|click|fill|capture|
   backlog|logs|shot`), auto-discovers `{port,token}` from `~/.web_agent_bridge.json`.
-- `tools/shared.mjs` — SSOT for what both clients must agree on: `loadDiscovery`,
+- `tools/shared.mjs` — generated SSOT for what both clients must agree on: `loadDiscovery`,
   `onJsonLines` NDJSON framing, `DEFAULT_PORT`.
-- `tools/e2e.mjs` — Playwright-style client over the `eval` op (locators,
+- `tools/e2e.mjs` — generated Playwright-style client over the `eval` op (locators,
   auto-wait, expect, drag, readBig, backend, live sink events, render-perf probe).
 - `tests/` — both suites run WITHOUT any host app.
 - `skills/juce-webview-agent-bridge/SKILL.md` — the skills.sh agent skill; must stay in lockstep
@@ -32,9 +35,11 @@ limits, screenshot/TCC setup) — this file is the working map.
 
 ```bash
 npm test                                        # JS suites (node:test, zero deps)
+npm ci --ignore-scripts && npm run build        # maintainer: compile strict TypeScript + declarations
+npm run test:types                              # consumer-facing TypeScript API fixture
 cmake -S tests -B build/test                    # C++ suite; -DWAB_JUCE_DIR=<path> reuses a local JUCE
 cmake --build build/test && ctest --test-dir build/test --output-on-failure
-npm run release [patch|minor|major|X.Y.Z]       # maintainer: bump 4 version sites + tag + push + gh release
+npm run release [patch|minor|major|X.Y.Z]       # recovery/local; normal releases use manual release.yml
 ```
 
 Run BOTH suites before claiming a change works. CI (`.github/workflows/tests.yml`)
@@ -44,11 +49,12 @@ Linux.
 ## Hard rules
 
 - **App-agnostic.** No specific app's selectors, native-function names, or page
-  globals anywhere in the module or `tools/`. Host projects build their own thin
+  globals anywhere in the module or `src/`. Host projects build their own thin
   wrappers over `backend`/`fireBackend`/`readBig`.
-- **Zero third-party client dependencies.** `tools/*.mjs` run on bare Node ≥ 18
+- **Zero third-party client dependencies.** Generated `tools/*.mjs` run on bare Node ≥ 18
   built-ins. Cross-client facts (discovery, NDJSON framing, default port) have
-  ONE owner: `tools/shared.mjs` — never re-copy them into a client.
+  ONE owner: `src/shared.mts` — never re-copy them into a client. TypeScript and
+  `@types/node` are development-only. Never edit generated `tools/*` by hand.
 - **Debug-only.** Gated to `JUCE_DEBUG` via `WEB_AGENT_BRIDGE_ENABLED`; never
   weaken that default or the `127.0.0.1` bind. The plaintext-token discovery
   file is `0600`; loopback is the trust boundary.
@@ -59,8 +65,8 @@ Linux.
   Windows capture/PNG encoding completes on a worker; sink broadcast runs on
   a dedicated writer thread, never the message thread; socket writes are
   serialized against close via `writeMutex`. Preserve these invariants.
-- **Version lives in 4 places** (package.json, module declaration, tests CMake,
-  README `GIT_TAG` pin) — never bump by hand; `scripts/release.sh` is the owner.
+- **Version lives in 5 places** (package.json, package-lock.json, module declaration,
+  tests CMake, README `GIT_TAG` pin) — never bump by hand; `scripts/release.sh` is the owner.
 
 ## Gotchas
 
