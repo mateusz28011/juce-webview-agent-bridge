@@ -12,6 +12,11 @@ on:
           - patch
           - minor
           - major
+      retry_version:
+        description: Existing version to publish to npm after a partial release (for example 0.3.0); normally leave blank
+        required: false
+        default: ''
+        type: string
 
 concurrency:
   group: release
@@ -56,19 +61,42 @@ jobs:
         run: npm install --global npm@^11.5.1
 
       - name: Configure release author
+        if: inputs.retry_version == ''
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
+      - name: Check out the existing release for an npm retry
+        if: inputs.retry_version != ''
+        env:
+          RELEASE_VERSION: ${{ inputs.retry_version }}
+        run: |
+          [[ "$RELEASE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          tag="v${RELEASE_VERSION}"
+          git fetch origin "refs/tags/${tag}:refs/tags/${tag}"
+          git merge-base --is-ancestor "${tag}^{}" origin/main
+          git switch --detach "$tag"
+          test "$(node -p "require('./package.json').version")" = "$RELEASE_VERSION"
+
       - name: Release GitHub and npm with bootstrap token
-        if: env.NPM_TOKEN != ''
+        if: inputs.retry_version == '' && env.NPM_TOKEN != ''
         run: npm run release -- "${{ inputs.bump }}"
         env:
           GH_TOKEN: ${{ github.token }}
           NODE_AUTH_TOKEN: ${{ env.NPM_TOKEN }}
 
       - name: Release GitHub and npm with trusted publishing
-        if: env.NPM_TOKEN == ''
+        if: inputs.retry_version == '' && env.NPM_TOKEN == ''
         run: npm run release -- "${{ inputs.bump }}"
         env:
           GH_TOKEN: ${{ github.token }}
+
+      - name: Retry npm publish with bootstrap token
+        if: inputs.retry_version != '' && env.NPM_TOKEN != ''
+        run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ env.NPM_TOKEN }}
+
+      - name: Retry npm publish with trusted publishing
+        if: inputs.retry_version != '' && env.NPM_TOKEN == ''
+        run: npm publish --access public
