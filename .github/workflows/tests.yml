@@ -19,8 +19,8 @@ jobs:
       matrix:
         node: [18, 22] # 18 = the engines floor, 22 = current
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
         with:
           node-version: ${{ matrix.node }}
       - run: npm test
@@ -44,7 +44,7 @@ jobs:
       matrix:
         os: [macos-14, windows-latest, ubuntu-latest]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install JUCE Linux deps
         if: runner.os == 'Linux'
@@ -58,7 +58,7 @@ jobs:
       # JUCE + Catch2 are FetchContent'd on first configure — cache the sources
       # so re-runs skip the ~200MB JUCE clone.
       - name: Cache FetchContent deps
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: build/test/_deps
           key: deps-${{ runner.os }}-${{ hashFiles('tests/CMakeLists.txt') }}
