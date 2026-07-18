@@ -78,6 +78,10 @@ jobs:
           git switch --detach "$tag"
           test "$(node -p "require('./package.json').version")" = "$RELEASE_VERSION"
 
+      - name: Install dependencies for an npm retry
+        if: inputs.retry_version != ''
+        run: npm ci --ignore-scripts
+
       - name: Release GitHub and npm with bootstrap token
         if: inputs.retry_version == '' && env.NPM_TOKEN != ''
         run: npm run release -- "${{ inputs.bump }}"
