@@ -1,6 +1,6 @@
 {
   "name": "juce-webview-agent-bridge",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "Typed, zero-dependency E2E client and CLI for driving live JUCE WebViews over a debug-only loopback bridge, without CDP.",
   "keywords": [
     "juce",
