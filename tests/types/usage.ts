@@ -3,11 +3,18 @@ import {
   expect,
   parseLayerTree,
   type AriaNode,
+  type Capabilities,
   type NetworkEventData,
   type Page,
   type RenderPerfResult,
 } from 'juce-webview-agent-bridge';
-import { DEFAULT_PORT, loadDiscovery } from 'juce-webview-agent-bridge/shared';
+import {
+  CLIENT_PROTOCOL_VERSION,
+  DEFAULT_PORT,
+  clientVersion,
+  loadDiscovery,
+  type BridgeCapabilities,
+} from 'juce-webview-agent-bridge/shared';
 
 async function exercisePublicTypes(page: Page): Promise<void> {
   const bpm = await page.backend<number>('getBpm');
@@ -23,7 +30,14 @@ async function exercisePublicTypes(page: Page): Promise<void> {
   await expect.poll(() => page.backend<number>('getBpm')).toBeGreaterThan(0);
   page.on('net', (event) => void event.data);
 
-  void [state, settled, response, tree, perf, parseLayerTree(''), DEFAULT_PORT, loadDiscovery()];
+  // Capabilities is the shared handshake shape; page.caps is null when the host
+  // could not answer it, so consumers must narrow before reading a field.
+  const caps: Capabilities = await page.capabilities();
+  const negotiated: BridgeCapabilities | null = page.caps;
+  const hostModule: string = negotiated?.moduleVersion ?? 'unknown';
+
+  void [state, settled, response, tree, perf, caps.ops, hostModule,
+       CLIENT_PROTOCOL_VERSION, clientVersion(), parseLayerTree(''), DEFAULT_PORT, loadDiscovery()];
 }
 
 void connect({ activate: 'My App' }).then(exercisePublicTypes);

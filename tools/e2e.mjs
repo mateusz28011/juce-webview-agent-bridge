@@ -31,7 +31,7 @@ import net from 'node:net';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { DEFAULT_PORT, loadDiscovery, onJsonLines } from './shared.mjs';
+import { DEFAULT_PORT, assertProtocolSupported, loadDiscovery, onJsonLines, parseHello, requireOp } from './shared.mjs';
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 /** Bring the host app's window to the foreground (macOS, best-effort; resolves
  *  false elsewhere). A backgrounded WebView reports document.hidden === true and
@@ -450,6 +450,21 @@ class Session {
     }
     catch { } }
 }
+/** Run the `hello` handshake and validate the protocol major.
+    Null means "capabilities unknown" — a host too old to answer `hello` must
+    stay usable exactly as before, so every guard stands down.
+
+    A transport failure is NOT folded into null: the reference host always
+    answers unknown ops with `ok:false`, so an exception here means the
+    connection is broken, and swallowing it would silently disable the guards
+    for the rest of the session. Validating here (rather than at the call site)
+    keeps the retry in capabilities() from returning an unvalidated host. */
+async function handshake(session) {
+    const caps = parseHello(await session.request({ op: 'hello' }));
+    if (caps)
+        assertProtocolSupported(caps);
+    return caps;
+}
 // ---- public API -----------------------------------------------------------
 export async function connect({ host = '127.0.0.1', port, token, timeout = 5000, interval = 50, log, logFile, logEcho, backendTimeoutMs = 10000, activate } = {}) {
     // Foreground the host window first (see activateApp) so polling/timers are live
@@ -472,10 +487,29 @@ export async function connect({ host = '127.0.0.1', port, token, timeout = 5000,
     });
     sock.unref(); // the persistent client socket must not, by itself, keep node alive
     const session = new Session(sock, resolvedToken);
-    if (resolvedToken)
-        await session.request({ op: 'auth', token: resolvedToken });
-    await session.request({ op: 'eval', code: PAGE_HELPERS }); // inject helpers once
-    const page = new Page(session, { defaultTimeout: timeout, interval, log: logger, backendTimeoutMs });
+    // Every failure past this point must close the socket before rethrowing:
+    // unref() keeps the client socket from holding Node open on its own, but an
+    // abandoned connection still pins the host's server handle.
+    let caps;
+    try {
+        if (resolvedToken)
+            await session.request({ op: 'auth', token: resolvedToken });
+        // Negotiate up front (one loopback round-trip): the client and the host's C++
+        // module version independently, so this is what turns a stale module pin into
+        // a named mismatch instead of a late `unknown op` or an unchecked reply.
+        caps = await handshake(session);
+        requireOp(caps, 'eval', 'connect()'); // the helpers below, and every locator, ride on it
+        const injected = await session.request({ op: 'eval', code: PAGE_HELPERS }); // inject helpers once
+        // An unchecked injection hands back a Page whose every locator then fails
+        // cryptically; a failed auth also surfaces here rather than silently.
+        if (!injected.ok)
+            throw new Error(`bridge rejected the page helpers: ${injected.error || 'unknown error'}`);
+    }
+    catch (e) {
+        session.close();
+        throw e;
+    }
+    const page = new Page(session, { defaultTimeout: timeout, interval, log: logger, backendTimeoutMs, caps });
     page.logFile = file; // where actions are being written (null if a custom log fn was passed)
     return page;
 }
@@ -485,14 +519,18 @@ export class Page {
     interval;
     backendTimeoutMs;
     log;
+    /** The `hello` handshake taken at connect(), or null when the host could not
+        answer it. Immutable for the life of the connection (one host process). */
+    caps;
     logFile = null;
     // opts.log?: (msg) => void — when given, every action (click/fill/drag/backend/
     // fire) emits a concise progress line as it runs. Off by default (no-op).
-    constructor(session, { defaultTimeout, interval, log, backendTimeoutMs = 10000 }) {
+    constructor(session, { defaultTimeout, interval, log, backendTimeoutMs = 10000, caps = null }) {
         this.session = session;
         this.defaultTimeout = defaultTimeout;
         this.interval = interval;
         this.backendTimeoutMs = backendTimeoutMs;
+        this.caps = caps;
         this.log = typeof log === 'function' ? log : () => { };
     }
     locator(selector) { return new Locator(this, selector); }
@@ -617,7 +655,10 @@ export class Page {
         events flow through the same on()/waitForEvent listeners (each carries a
         monotonic `seq` for dedup). Resolves with the number of events replayed. */
     async replayEvents({ since = 0 } = {}) {
+        requireOp(this.caps, 'sink_replay', 'page.replayEvents()');
         const r = await this.session.request({ op: 'sink_replay', since });
+        if (!r.ok)
+            throw new Error(r.error || 'sink_replay failed');
         return r.count;
     }
     /** Poll a JS boolean expression in the page until it is truthy (or time out).
@@ -706,14 +747,17 @@ export class Page {
     })()`));
     }
     /** Capabilities handshake: { protocolVersion, platform, ops, screenshotAvailable,
-        authRequired }. Lets a caller branch on what the host supports (e.g. skip
-        screenshots when screenshotAvailable is false) without probing op-by-op. */
+        authRequired, moduleVersion? }. Lets a caller branch on what the host supports
+        (e.g. skip screenshots when screenshotAvailable is false) without probing
+        op-by-op. Returns the handshake connect() already took — it cannot change
+        within a connection — and only asks again if that one did not land. */
     async capabilities() {
-        const r = await this.session.request({ op: 'hello' });
-        return {
-            protocolVersion: r.protocolVersion, platform: r.platform, ops: r.ops,
-            screenshotAvailable: r.screenshotAvailable, authRequired: r.authRequired,
-        };
+        if (this.caps)
+            return this.caps;
+        const caps = await handshake(this.session);
+        if (!caps)
+            throw new Error('bridge did not answer the hello handshake');
+        return caps;
     }
     /** Toggle WebKit's compositing debug overlays (layer borders + repaint
         counters) on the host's WKWebView via the bridge `layerdebug` op. The
@@ -722,6 +766,7 @@ export class Page {
         macOS-only; throws where the backend has no such SPI. Remember to turn it
         OFF before any pixel-comparison capture: the overlays are pixels too. */
     async layerDebug(enabled = true) {
+        requireOp(this.caps, 'layerdebug', 'page.layerDebug()');
         this.log(`layerdebug ${enabled ? 'on' : 'off'}`);
         const r = await this.session.request({ op: 'layerdebug', enabled }, { timeoutMs: 10000 });
         if (!r.ok)
@@ -733,6 +778,7 @@ export class Page {
         to census compositing layers (count, geometry) from a script instead of
         reading overlay pixels off a screenshot. macOS-only; throws elsewhere. */
     async layerTree() {
+        requireOp(this.caps, 'layertree', 'page.layerTree()');
         this.log('layertree');
         const r = await this.session.request({ op: 'layertree' }, { timeoutMs: 10000 });
         if (!r.ok)
@@ -743,6 +789,7 @@ export class Page {
         Writes a PNG host-side and returns its path. Pass { path } to choose where, and
         { clip: {x,y,w,h} } (CSS px) to crop to a UI region for a much smaller PNG. */
     async screenshot({ path, clip } = {}) {
+        requireOp(this.caps, 'shot', 'page.screenshot()');
         this.log(`screenshot${clip ? ' (region)' : ''}${path ? ' ' + path : ''}`);
         const r = await this.session.request({ op: 'shot', ...(path ? { path } : {}), ...(clip ? { rect: clip } : {}) }, { timeoutMs: 30000 });
         if (!r.ok)

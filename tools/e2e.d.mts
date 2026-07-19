@@ -1,4 +1,5 @@
 import type { Socket } from 'node:net';
+import type { BridgeCapabilities } from './shared.mjs';
 type ProtocolMessage = Record<string, any>;
 type LogFn = (message: string) => void;
 type TimeoutOptions = {
@@ -43,13 +44,10 @@ export type NetworkEventData = {
     status?: number;
     [key: string]: unknown;
 };
-export type Capabilities = {
-    protocolVersion: number;
-    platform: string;
-    ops: string[];
-    screenshotAvailable: boolean;
-    authRequired: boolean;
-};
+/** The `hello` handshake. Shape owned by shared.mts (both clients negotiate
+    against it); re-exported here under the name this client has always used. */
+export type Capabilities = BridgeCapabilities;
+export type { BridgeCapabilities };
 export type RenderPerfResult = {
     durMs: number;
     commitsPerSec: number;
@@ -162,12 +160,16 @@ export declare class Page {
     readonly interval: number;
     readonly backendTimeoutMs: number;
     readonly log: LogFn;
+    /** The `hello` handshake taken at connect(), or null when the host could not
+        answer it. Immutable for the life of the connection (one host process). */
+    readonly caps: BridgeCapabilities | null;
     logFile: string | null;
-    constructor(session: Session, { defaultTimeout, interval, log, backendTimeoutMs }: {
+    constructor(session: Session, { defaultTimeout, interval, log, backendTimeoutMs, caps }: {
         defaultTimeout: number;
         interval: number;
         log: LogFn;
         backendTimeoutMs?: number;
+        caps?: BridgeCapabilities | null;
     });
     locator(selector: string): Locator;
     getByTestId(id: string): Locator;
@@ -241,8 +243,10 @@ export declare class Page {
         motionSelector?: string | null;
     }): Promise<RenderPerfResult>;
     /** Capabilities handshake: { protocolVersion, platform, ops, screenshotAvailable,
-        authRequired }. Lets a caller branch on what the host supports (e.g. skip
-        screenshots when screenshotAvailable is false) without probing op-by-op. */
+        authRequired, moduleVersion? }. Lets a caller branch on what the host supports
+        (e.g. skip screenshots when screenshotAvailable is false) without probing
+        op-by-op. Returns the handshake connect() already took — it cannot change
+        within a connection — and only asks again if that one did not land. */
     capabilities(): Promise<Capabilities>;
     /** Toggle WebKit's compositing debug overlays (layer borders + repaint
         counters) on the host's WKWebView via the bridge `layerdebug` op. The
@@ -356,4 +360,3 @@ export interface ExpectFunction {
     poll<T>(fn: () => T | Promise<T>, options?: PollExpectOptions): PollAssertions<T>;
 }
 export declare const expect: ExpectFunction;
-export {};

@@ -42,4 +42,11 @@
  #define WEB_AGENT_BRIDGE_ENABLED JUCE_DEBUG
 #endif
 
+/** This module's version, mirroring the `version:` field of the declaration
+    above (which is a comment, so C++ cannot read it). Reported in the `hello`
+    reply so a client that finds a capability missing can name the exact module
+    build the host embeds. scripts/release.sh owns both sites and verifies them.
+*/
+#define WEB_AGENT_BRIDGE_VERSION "0.4.0"
+
 #include "detail/WebAgentBridge.h"

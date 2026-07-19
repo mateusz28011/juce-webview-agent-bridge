@@ -31,10 +31,29 @@ also carries `token` until the connection is authenticated.
 | `{"id","op":"shot","path"?,"rect"?}` | `{"id","op":"shot","ok",path,"error"?}` (PNG written by the host; `rect`={x,y,w,h} CSS px crops to a region) |
 | `{"id","op":"bounds"}` | `{"id","op":"bounds","ok",x,y,w,h}` (screen coords) |
 | `{"id","op":"ping"}` | `{"id","op":"ping","ok":true}` |
-| `{"id","op":"hello"}` | `{"id","op":"hello","ok",protocolVersion,ops[],platform,screenshotAvailable,authRequired}` |
+| `{"id","op":"hello"}` | `{"id","op":"hello","ok",protocolVersion,moduleVersion,ops[],platform,screenshotAvailable,authRequired}` — `moduleVersion` is the host's C++ module version (absent on hosts predating it) |
 | `{"id","op":"layerdebug","enabled"?}` | `{"id","op":"layerdebug","ok",enabled,"error"?}` — toggles WebKit compositing debug overlays (layer borders + repaint counters) on every WKWebView via WKPreferences SPI; macOS only, Debug-only module. Overlays render into the window, so `shot` captures them. |
 | `{"id","op":"layertree"}` | `{"id","op":"layertree","ok","text"?,"error"?}` — dumps the first WKWebView's UI-process (remote) CALayer tree as text via the `_caLayerTreeAsText` SPI: a programmatic compositing-layer census (count + geometry) with no screenshot needed; macOS only. |
 | `{"id","op":"sink_replay","since"?}` | re-sends buffered `sink` frames with `seq` > `since`, then `{"id","op":"sink_replay","ok",count}` |
+
+## Version negotiation
+
+The client and the host module version independently — a plugin pins a module
+tag at build time, while the test host installs a client from npm — so equal
+versions are not the goal and are not required. `hello` carries both halves of
+the negotiation, with different jobs:
+
+- **`ops`** is the capability list and the check that matters. It grows
+  additively, so an older client against a newer host is fine by design. A
+  client needing an op absent from this list should fail with a message naming
+  `moduleVersion` and its own version, since the cause is a stale module pin in
+  the host's build, not a client bug.
+- **`protocolVersion`** is the coarse tripwire, moved ONLY by a breaking
+  revision. A host advertising a higher one than the client knows is a host the
+  client cannot speak to; refuse the connection rather than fail later.
+
+A host too old to answer `hello` reports no capabilities at all. Treat that as
+"unknown", not "unsupported", and leave the guards off — it must keep working.
 
 ## Sink stream
 

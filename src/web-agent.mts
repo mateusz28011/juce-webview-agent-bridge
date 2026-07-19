@@ -27,7 +27,8 @@
 import net from 'node:net';
 import path from 'node:path';
 
-import { DEFAULT_PORT, loadDiscovery, onJsonLines } from './shared.mjs';
+import { DEFAULT_PORT, assertProtocolSupported, loadDiscovery, onJsonLines, parseHello, requireOp } from './shared.mjs';
+import type { BridgeCapabilities } from './shared.mjs';
 
 type ProtocolMessage = Record<string, any>;
 type SinkEvent = { kind?: string; t?: number; data?: Record<string, any> };
@@ -97,7 +98,32 @@ const fillSnippet = (sel: string, val: string) => `(() => {
   return 'ok';
 })()`;
 
+// Commands that must survive a version mismatch instead of being blocked by it:
+// `ping` answers "is anything alive", and `hello` is the very tool you reach for
+// to SEE a mismatch. Refusing them on a protocol bump would remove the two
+// diagnostics you need most at exactly the moment you need them.
+const DIAGNOSTIC_CMDS = new Set(['ping', 'hello']);
+
+/** Negotiate once per CLI run: refuse a host whose protocol major is newer than
+    this client, and expose its op set to the per-command guards. Null means the
+    host is too old to answer `hello`, which must keep working untouched. */
+let hostCaps: BridgeCapabilities | null = null;
+async function negotiate(): Promise<void> {
+  hostCaps = parseHello(await request({ op: 'hello' }));
+  if (hostCaps) assertProtocolSupported(hostCaps);
+}
+
+/** Gate a command on an op the host may not have: without this an older module
+    answers `unknown op: <x>`, which reads as a client bug rather than the stale
+    module pin it actually is. */
+function requireHostOp(op: string, api: string): void {
+  requireOp(hostCaps, op, api);
+}
+
 async function main() {
+  // One handshake per run, before any command runs: a host advertising a newer
+  // protocol major is refused here rather than half-served command by command.
+  if (cmd && !DIAGNOSTIC_CMDS.has(cmd)) await negotiate();
   switch (cmd) {
     case 'ping': {
       const r = await request({ op: 'ping' });
@@ -105,6 +131,7 @@ async function main() {
       break;
     }
     case 'layerdebug': {
+      requireHostOp('layerdebug', 'the `layerdebug` command');
       const enabled = rest[0] !== 'off';
       const r = await request({ op: 'layerdebug', enabled });
       console.log(
@@ -115,6 +142,7 @@ async function main() {
       break;
     }
     case 'layertree': {
+      requireHostOp('layertree', 'the `layertree` command');
       const r = await request({ op: 'layertree' });
       console.log(r.ok ? r.text : `failed: ${r.error || 'unavailable'}`);
       break;
@@ -122,7 +150,8 @@ async function main() {
     case 'hello': {
       const r = await request({ op: 'hello' });
       console.log(fmt({
-        protocolVersion: r.protocolVersion, platform: r.platform,
+        protocolVersion: r.protocolVersion, moduleVersion: r.moduleVersion ?? '(not reported)',
+        platform: r.platform,
         screenshotAvailable: r.screenshotAvailable, authRequired: r.authRequired, ops: r.ops,
       }));
       break;
@@ -172,6 +201,7 @@ async function main() {
       // with a different CWD (its .app bundle), so a relative path would both
       // trip JUCE's File-ctor assertion (juce_File.cpp:219 wants absolute) and
       // write the PNG next to the bundle instead of where the caller expects.
+      requireHostOp('shot', 'the `shot` command');
       const out = rest[0] ? path.resolve(rest[0]) : undefined;
       const sel = rest[1];
       let rect: unknown;

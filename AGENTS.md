@@ -70,8 +70,9 @@ Linux.
   Windows capture/PNG encoding completes on a worker; sink broadcast runs on
   a dedicated writer thread, never the message thread; socket writes are
   serialized against close via `writeMutex`. Preserve these invariants.
-- **Version lives in 5 places** (package.json, package-lock.json, module declaration,
-  tests CMake, README `GIT_TAG` pin) — never bump by hand; `scripts/release.sh` is the owner.
+- **Version lives in 6 places** (package.json, package-lock.json, module declaration,
+  the `WEB_AGENT_BRIDGE_VERSION` macro the `hello` reply reports, tests CMake,
+  README `GIT_TAG` pin) — never bump by hand; `scripts/release.sh` is the owner.
 
 ## Changelog and releases
 

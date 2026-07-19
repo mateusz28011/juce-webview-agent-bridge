@@ -5,6 +5,39 @@ commit comparisons are available from the linked GitHub Releases.
 
 ## [Unreleased]
 
+### Added
+
+- The `hello` reply now reports `moduleVersion`, the version of the C++ module
+  the host embeds. `protocolVersion` only moves on a breaking change, so it
+  could not identify a plugin built against an older module pin.
+- Both clients now negotiate capabilities against the `hello` handshake. An API
+  that needs an op the host does not provide fails immediately with an error
+  naming the host module version, the client version, and the fix (bump the
+  plugin's `GIT_TAG` and rebuild) instead of the host's bare `unknown op`.
+  Connecting to a host that advertises a newer protocol major now fails outright
+  rather than misbehaving later.
+
+### Fixed
+
+- `page.replayEvents()` now surfaces a failed `sink_replay` reply as an error
+  instead of silently resolving with an undefined count.
+- `connect()` now fails when the host rejects the page-helper injection, instead
+  of returning a session whose every locator then failed for unclear reasons.
+  A failed authentication also surfaces here rather than passing silently.
+- `connect()` no longer leaves the connection open when initialization fails.
+
+### Changed
+
+- The CLI performs the handshake once per run, so a host advertising a newer
+  protocol major is refused before the command runs rather than part-way through.
+  `ping` and `hello` are exempt: they are the diagnostics you need in order to
+  see a version mismatch at all.
+- `page.capabilities()` returns the handshake taken during `connect()` (it
+  cannot change within a connection) instead of issuing a second `hello`.
+  `page.caps` exposes the same value, or `null` against a host too old to answer
+  the handshake — in which case every capability guard stands down, so existing
+  setups keep working unchanged.
+
 ## [0.4.0] - 2026-07-18
 
 ### Added

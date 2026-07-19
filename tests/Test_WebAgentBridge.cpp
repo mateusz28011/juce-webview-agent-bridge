@@ -391,6 +391,11 @@ TEST_CASE ("WebAgentBridge hello reports protocol version + capabilities", "[web
     REQUIRE ((int) r.getProperty ("protocolVersion", 0) == 1);
     REQUIRE ((bool) r.getProperty ("authRequired", false)); // token gate is active
 
+    // The module build, so a client can name it when a capability is missing:
+    // protocolVersion only moves on a breaking change and cannot identify a
+    // plugin built against a stale module pin. Must match the declaration.
+    REQUIRE (r.getProperty ("moduleVersion", juce::var()).toString() == WEB_AGENT_BRIDGE_VERSION);
+
     const auto ops = r.getProperty ("ops", juce::var());
     REQUIRE (ops.isArray());
     bool hasShot = false, hasEval = false;

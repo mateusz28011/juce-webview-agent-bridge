@@ -21,7 +21,7 @@ import { fileURLToPath } from 'node:url';
 const CLIENT = fileURLToPath(new URL('../tools/web-agent.mjs', import.meta.url));
 
 // A mock bridge. Captures what the client sends and serves controlled replies.
-function startMockBridge({ onEval, requireToken = 'T', splitUtf8 = false, afterAuth } = {}) {
+function startMockBridge({ onEval, requireToken = 'T', splitUtf8 = false, afterAuth, hello = {} } = {}) {
   const state = { lastEval: null, lastShot: null, sawToken: null, connections: 0 };
   const server = net.createServer((sock) => {
     state.connections++;
@@ -46,8 +46,9 @@ function startMockBridge({ onEval, requireToken = 'T', splitUtf8 = false, afterA
         if (m.op === 'auth') { reply({ op: 'auth', ok: true }); if (afterAuth) afterAuth(sock); continue; }
         if (m.op === 'ping') { reply({ op: 'ping', ok: true }); continue; }
         if (m.op === 'hello') {
-          reply({ op: 'hello', ok: true, protocolVersion: 1, platform: 'mac',
-                  ops: ['ping', 'eval', 'shot'], screenshotAvailable: false, authRequired: true });
+          // `hello` overrides let a test stand in for an older or newer host.
+          reply({ op: 'hello', ok: true, protocolVersion: 1, platform: 'mac', moduleVersion: '0.4.0',
+                  ops: ['ping', 'eval', 'shot'], screenshotAvailable: false, authRequired: true, ...hello });
           continue;
         }
         if (m.op === 'eval') {
@@ -209,6 +210,43 @@ test('hello: prints the capabilities handshake', async () => {
   } finally {
     server.close();
   }
+});
+
+// ---- version-skew guards ---------------------------------------------------
+
+test('a newer protocol major is refused for ordinary commands', async () => {
+  const { server, port } = await startMockBridge({ hello: { protocolVersion: 99, moduleVersion: '9.0.0' } });
+  try {
+    const home = tempHomeWith({ port, token: 'T' });
+    const { code, err } = await runClient(['eval', '1+1'], { home });
+    assert.notEqual(code, 0, 'command refused');
+    assert.match(err, /protocol 99 is newer than this client understands/);
+  } finally { server.close(); }
+});
+
+test('ping and hello still work against a mismatched host', async () => {
+  // The two diagnostics must survive the mismatch — `hello` is precisely how you
+  // see it, so gating them behind the same check would hide the evidence.
+  const { server, port } = await startMockBridge({ hello: { protocolVersion: 99, moduleVersion: '9.0.0' } });
+  try {
+    const home = tempHomeWith({ port, token: 'T' });
+    const ping = await runClient(['ping'], { home });
+    assert.equal(ping.code, 0, 'ping answers regardless of protocol skew');
+    const hello = await runClient(['hello'], { home });
+    assert.equal(hello.code, 0);
+    assert.match(hello.out, /"protocolVersion": 99/, 'shows the mismatch instead of refusing');
+  } finally { server.close(); }
+});
+
+test('a command needing an op the host lacks names the module version', async () => {
+  const { server, port } = await startMockBridge({ hello: { ops: ['ping', 'eval'], moduleVersion: '0.3.0' } });
+  try {
+    const home = tempHomeWith({ port, token: 'T' });
+    const { code, err } = await runClient(['shot', '/tmp/x.png'], { home });
+    assert.notEqual(code, 0);
+    assert.match(err, /needs the "shot" op/);
+    assert.match(err, /host module 0\.3\.0/);
+  } finally { server.close(); }
 });
 
 test('shot <out>: sends the shot op with the path and prints the returned path', async () => {

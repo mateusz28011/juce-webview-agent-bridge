@@ -19,7 +19,7 @@ The client auto-discovers port + session token from `~/.web_agent_bridge.json` (
 ## Commands
 
 - `ping` — liveness.
-- `hello` — capabilities handshake: protocol version, platform, ops, `screenshotAvailable`, `authRequired`.
+- `hello` — capabilities handshake: protocol version, `moduleVersion` (the C++ module the host embeds), platform, ops, `screenshotAvailable`, `authRequired`. The npm client and the host module version independently, so both clients negotiate against this: an API needing an op the host lacks fails up front naming both versions and the fix (bump the plugin's `GIT_TAG`), rather than the host's bare `unknown op`.
 - `eval "<js>"` — run JS, get JSON result. Read state, call app globals, mutate the page.
 - `dom [selector]` — outerHTML (default `html`). For *inspection*, prefer `e2e.mjs` `ariaSnapshot()` (compact role/name tree, far fewer tokens).
 - `click <selector>` — `el.click()`.
@@ -46,7 +46,7 @@ page.close();
 
 - **Selectors:** `css` (default), `text=<exact>`, `role=<role>[name="..."]`.
 - **Locator:** `click`/`dblclick`/`hover`/`fill`/`type`/`press(key)`/`selectOption(v)`/`check`/`uncheck`/`focus`/`drag`/`screenshot({path})` (crops to the element's box)/`ariaSnapshot`/`textContent`/`getAttribute`/`count`/`isVisible`/`waitFor`/`nth`/`first`.
-- **Page:** `getByTestId`/`evaluate`/`readBig`/`capabilities()` (the `hello` handshake)/`screenshot({path,clip})` (`clip:{x,y,w,h}` CSS px → region crop)/`ariaSnapshot()` (compact role/name tree — token-cheap inspection)/`waitForFunction(expr)`.
+- **Page:** `getByTestId`/`evaluate`/`readBig`/`capabilities()` (the `hello` handshake, taken once at `connect()`; `page.caps` is the same value, `null` against a host too old to answer it)/`screenshot({path,clip})` (`clip:{x,y,w,h}` CSS px → region crop)/`ariaSnapshot()` (compact role/name tree — token-cheap inspection)/`waitForFunction(expr)`.
 - **Settle primitives (no fixed sleeps):** `page.poll(expr, pred)` re-reads a small expression until `pred(value)` holds, returning the LAST value seen (a timeout surfaces as a normal assertion failure, not an exception); `page.pollStable(expr)` reads until consecutive reads settle — for values that ramp over several frames (a knob drag), so assertions see the settled value. Use these after any native round-trip instead of `sleep`.
 - **Render-perf probe:** `page.measureRenderPerf({durationMs, motionSelector})` → React commits/s + rAF frame-gap `p50/p95/p99gap`/`maxGap` + refresh-relative dropped-frame counts (valid on any Hz). Canvas/Pixi/WebGL shares the main thread, so a high p99 gap IS a visible stutter; `motionSelector` reports whether matched elements actually moved (`motion`).
 - **Foregrounding:** `connect({ activate: '<App Name>' })` (or `activateApp(name)`) raises the host window first (macOS) — the fix for the backgrounded-stale gotcha below.

@@ -26,8 +26,8 @@ afterEach(() => { for (const p of openPages.splice(0)) { try { p.close(); } catc
 // test script the result per eval via onEval(code, state). It also tracks every
 // connected socket so a test can push unsolicited `sink` frames (the live
 // console/network/error stream) via the returned pushSink() helper.
-function startMock({ onEval, onShot, onLayerTree } = {}) {
-  const state = { evals: [], token: null, sockets: [] };
+function startMock({ onEval, onShot, onLayerTree, hello = {}, dropOnHello = false } = {}) {
+  const state = { evals: [], token: null, sockets: [], helloCount: 0 };
   const server = net.createServer((sock) => {
     sock.on('error', () => {});
     state.sockets.push(sock);
@@ -44,8 +44,15 @@ function startMock({ onEval, onShot, onLayerTree } = {}) {
         const reply = (o) => sock.write(JSON.stringify({ id: m.id, ...o }) + '\n');
         if (m.op === 'auth') { reply({ op: 'auth', ok: true }); continue; }
         if (m.op === 'hello') {
+          // The default op list mirrors the real module's kOpTable — the client
+          // negotiates against it, so a mock that under-advertises would fail
+          // every guarded op. `hello` overrides simulate an older/newer host.
+          state.helloCount++;
+          if (dropOnHello) { sock.destroy(); return; } // transport failure, not a legacy host
           reply({ op: 'hello', ok: true, protocolVersion: 1, platform: 'mac',
-                  ops: ['hello', 'ping', 'auth', 'eval', 'bounds', 'shot', 'sink_replay'], screenshotAvailable: true, authRequired: true });
+                  moduleVersion: '0.4.0',
+                  ops: ['hello', 'ping', 'auth', 'eval', 'bounds', 'shot', 'layerdebug', 'layertree', 'sink_replay'],
+                  screenshotAvailable: true, authRequired: true, ...hello });
           continue;
         }
         if (m.op === 'sink_replay') {
@@ -448,6 +455,85 @@ test('replayEvents re-sends buffered sink events through the listeners', async (
     const n = await page.replayEvents();
     assert.equal(n, 1);
     assert.deepEqual(got, ['/replayed']);
+    page.close();
+  } finally { server.close(); }
+});
+
+// ---- version-skew guards --------------------------------------------------
+// The npm client and the host's C++ module version independently (the plugin
+// pins a module tag at build time), so the `hello` handshake is what keeps a
+// stale pin from surfacing as a cryptic `unknown op` or an unchecked reply.
+
+test('an op missing from the host names the module version instead of "unknown op"', async () => {
+  // A host built against an older module: no layertree/layerdebug in its op set.
+  const ops = ['hello', 'ping', 'auth', 'eval', 'bounds', 'shot', 'sink_replay'];
+  const { server, port } = await startMock({ onEval: () => 'ok', hello: { ops, moduleVersion: '0.3.0' } });
+  try {
+    const page = await openPage(port);
+    await assert.rejects(() => page.layerTree(), (e) => {
+      assert.match(e.message, /needs the "layertree" op/);
+      assert.match(e.message, /host module 0\.3\.0/, 'names the host module build');
+      assert.match(e.message, /GIT_TAG/, 'says how to fix it');
+      return true;
+    });
+    page.close();
+  } finally { server.close(); }
+});
+
+test('a host speaking a newer protocol major fails the connection outright', async () => {
+  const { server, port } = await startMock({ onEval: () => 'ok', hello: { protocolVersion: 99, moduleVersion: '9.0.0' } });
+  try {
+    await assert.rejects(() => openPage(port), /protocol 99 is newer than this client understands/);
+  } finally { server.close(); }
+});
+
+test('a host too old to answer hello stays usable (guards stand down)', async () => {
+  // Pre-handshake module: `hello` is an unknown op. Nothing may start failing
+  // that used to work, so caps stay null and every requireOp() is a no-op.
+  const { server, port } = await startMock({
+    onEval: () => 'ok',
+    hello: { ok: false, error: 'unknown op: hello', ops: undefined },
+  });
+  try {
+    const page = await openPage(port);
+    assert.equal(page.caps, null, 'no capabilities negotiated');
+    assert.equal(await page.evaluate('1'), 'ok', 'ordinary ops still work');
+    await assert.rejects(() => page.layerTree(), /no WKWebView found/, 'falls back to the host error, not a guard error');
+    page.close();
+  } finally { server.close(); }
+});
+
+test('a transport failure during the handshake fails loudly, not into silent no-guards', async () => {
+  // Distinct from a legacy host: an exception means the connection is broken, and
+  // folding it into "capabilities unknown" would disable every guard for the rest
+  // of the session without a word. Simulated by dropping the socket on hello.
+  const { server, port } = await startMock({ onEval: () => 'ok', dropOnHello: true });
+  try {
+    await assert.rejects(() => openPage(port), /bridge connection closed/);
+  } finally { server.close(); }
+});
+
+test('a rejected page-helper injection fails connect() and closes the socket', async () => {
+  // Left unchecked this returns a Page whose every locator then fails cryptically.
+  const { server, state, port } = await startMock({
+    onEval: (code) => { if (code.includes('window.__wae =')) throw new Error('auth required'); return 'ok'; },
+  });
+  try {
+    await assert.rejects(() => openPage(port), /bridge rejected the page helpers: .*auth required/);
+    await new Promise((r) => setTimeout(r, 50));
+    assert.equal(state.sockets.length, 0, 'the refused connection was closed, not leaked');
+  } finally { server.close(); }
+});
+
+test('capabilities() reports moduleVersion and reuses the connect handshake', async () => {
+  const { server, state, port } = await startMock({ onEval: () => 'ok', hello: { moduleVersion: '0.4.0' } });
+  try {
+    const page = await openPage(port);
+    const caps = await page.capabilities();
+    assert.equal(caps.moduleVersion, '0.4.0');
+    assert.equal(caps.protocolVersion, 1);
+    assert.ok(caps.ops.includes('layertree'));
+    assert.equal(state.helloCount, 1, 'handshake taken once at connect, not re-requested');
     page.close();
   } finally { server.close(); }
 });

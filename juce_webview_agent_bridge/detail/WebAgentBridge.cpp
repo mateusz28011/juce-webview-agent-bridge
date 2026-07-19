@@ -289,6 +289,10 @@ struct WebAgentBridge::Impl : public std::enable_shared_from_this<WebAgentBridge
         // front (e.g. screenshotAvailable) instead of probing op-by-op.
         auto r = makeReply (id, "hello", true);
         r->setProperty ("protocolVersion", 1);
+        // The module build the host embeds. protocolVersion only moves on a
+        // BREAKING change, so it cannot tell a client whose plugin was built
+        // against an older pin; this names that build outright. Additive field.
+        r->setProperty ("moduleVersion", WEB_AGENT_BRIDGE_VERSION);
 
         juce::Array<juce::var> ops;
         for (const auto& entry : kOpTable)
