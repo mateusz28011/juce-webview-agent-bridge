@@ -67,6 +67,35 @@ if git rev-parse -q --verify "refs/tags/${tag}" >/dev/null; then
 fi
 echo "▸ ${current} -> ${new}"
 
+# --- the changelog must already describe this release ---------------------------
+# Every version site below is written by sed and then verified by grep, so a
+# silent miss there is impossible. The changelog is prepared BY HAND and had no
+# such check — which is exactly how v0.5.0 shipped with its entries still sitting
+# under [Unreleased], no [0.5.0] section, and stale comparison links. Enforce it
+# here, before anything is mutated, so a failure leaves the tree untouched.
+changelog_fail() {
+  echo "✗ CHANGELOG.md is not prepared for ${tag}: $1" >&2
+  echo "  Prepare it first (see AGENTS.md 'Preparing a release'):" >&2
+  echo "    1. move the [Unreleased] entries under '## [${new}] - $(date +%Y-%m-%d)'" >&2
+  echo "    2. leave a new, EMPTY [Unreleased] section above it" >&2
+  echo "    3. bottom links: '[${new}]: <repo>/releases/tag/${tag}' and" >&2
+  echo "       '[Unreleased]: <repo>/compare/${tag}...HEAD'" >&2
+  echo "  Then re-run the release. Nothing has been modified." >&2
+  exit 1
+}
+grep -qE "^## \[${new}\] - [0-9]{4}-[0-9]{2}-[0-9]{2}$" CHANGELOG.md \
+  || changelog_fail "no '## [${new}] - YYYY-MM-DD' section"
+# The released entries must have been MOVED, not copied: anything still left under
+# [Unreleased] means the section was never emptied.
+if sed -n '/^## \[Unreleased\]$/,/^## \[/p' CHANGELOG.md | sed '1d;$d' | grep -q '[^[:space:]]'; then
+  changelog_fail "the [Unreleased] section still has entries in it"
+fi
+grep -qE "^\[${new}\]: .*/releases/tag/${tag}$" CHANGELOG.md \
+  || changelog_fail "no '[${new}]:' link at the bottom"
+grep -qE "^\[Unreleased\]: .*/compare/${tag}\.\.\.HEAD$" CHANGELOG.md \
+  || changelog_fail "the [Unreleased] link does not compare from ${tag}"
+echo "▸ changelog ready for ${tag}"
+
 # --- write every version site ---------------------------------------------------
 node -e "
   const fs = require('fs');

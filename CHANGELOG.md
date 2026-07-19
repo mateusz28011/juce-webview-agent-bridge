@@ -5,6 +5,22 @@ commit comparisons are available from the linked GitHub Releases.
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-07-19
+
+### Fixed
+
+- The error raised when the host's module lacks a required op no longer tells
+  you to bump a `FetchContent` `GIT_TAG`. Projects that embed the module as a
+  git submodule or a vendored copy have no such pin, so the advice sent them
+  looking for something their build does not contain.
+- `scripts/release.sh` now refuses to release until `CHANGELOG.md` documents the
+  version being released, checked before it modifies anything. v0.5.0 shipped
+  with its entries still under `[Unreleased]` and comparison links pointing at
+  the previous release; every other release step was already self-verifying.
+  The release runbook is now written up in `docs/releasing.md`.
+
+## [0.5.0] - 2026-07-19
+
 ### Added
 
 - The `hello` reply now reports `moduleVersion`, the version of the C++ module
@@ -115,7 +131,9 @@ There are no package API changes in this release.
 - Zero-dependency CLI, Playwright-shaped E2E client, agent skill, and standalone
   JavaScript and C++ test suites.
 
-[Unreleased]: https://github.com/mateusz28011/juce-webview-agent-bridge/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/mateusz28011/juce-webview-agent-bridge/compare/v0.5.1...HEAD
+[0.5.1]: https://github.com/mateusz28011/juce-webview-agent-bridge/releases/tag/v0.5.1
+[0.5.0]: https://github.com/mateusz28011/juce-webview-agent-bridge/releases/tag/v0.5.0
 [0.4.0]: https://github.com/mateusz28011/juce-webview-agent-bridge/releases/tag/v0.4.0
 [0.3.1]: https://github.com/mateusz28011/juce-webview-agent-bridge/releases/tag/v0.3.1
 [0.3.0]: https://github.com/mateusz28011/juce-webview-agent-bridge/releases/tag/v0.3.0

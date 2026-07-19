@@ -91,15 +91,23 @@ Linux.
 
 ### Preparing a release
 
+**Full runbook: [docs/releasing.md](docs/releasing.md)** — follow it, not memory.
+
 1. Ask for explicit approval of the exact target version and release action.
-   Never infer approval from a request to prepare release files.
+   Never infer approval from a request to prepare release files. Pick the bump by
+   what changed: anything additive (a new export, a new `hello` field, a new op)
+   is a **minor**, never a patch.
 2. Move the relevant `[Unreleased]` entries to
    `## [X.Y.Z] - YYYY-MM-DD`, restore an empty `[Unreleased]` section, and update
-   the comparison links at the bottom of `CHANGELOG.md`.
+   the comparison links at the bottom of `CHANGELOG.md`. This is the only
+   by-hand step in a release and therefore the one that gets skipped —
+   `scripts/release.sh` now refuses to run until it is done (before mutating
+   anything), and `tests/release.test.mjs` covers both that gate and the repo's
+   own changelog state.
 3. Run the Node build, JS tests, public type fixture, npm pack dry-run, and the
    standalone C++ suite. Do not release with a failing or skipped required suite.
 4. Use the manual `.github/workflows/release.yml` workflow for normal releases.
-   Choose `patch`, `minor`, or `major`; `scripts/release.sh` owns all five version
+   Choose `patch`, `minor`, or `major`; `scripts/release.sh` owns all six version
    sites and must not be replaced with hand-edited version bumps.
 5. Do not push unrelated changes while the release workflow is running. Its
    publish job intentionally refuses to release if `main` moved after testing.
