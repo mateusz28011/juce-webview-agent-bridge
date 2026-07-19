@@ -19,7 +19,7 @@ The client auto-discovers port + session token from `~/.web_agent_bridge.json` (
 ## Commands
 
 - `ping` — liveness.
-- `hello` — capabilities handshake: protocol version, `moduleVersion` (the C++ module the host embeds), platform, ops, `screenshotAvailable`, `authRequired`. The npm client and the host module version independently, so both clients negotiate against this: an API needing an op the host lacks fails up front naming both versions and the fix (bump the plugin's `GIT_TAG`), rather than the host's bare `unknown op`.
+- `hello` — capabilities handshake: protocol version, `moduleVersion` (the C++ module the host embeds), platform, ops, `screenshotAvailable`, `authRequired`. The npm client and the host module version independently, so both clients negotiate against this: an API needing an op the host lacks fails up front naming both versions and the fix (update the module the plugin builds against — FetchContent pin, git submodule, or vendored copy — and rebuild), rather than the host's bare `unknown op`.
 - `eval "<js>"` — run JS, get JSON result. Read state, call app globals, mutate the page.
 - `dom [selector]` — outerHTML (default `html`). For *inspection*, prefer `e2e.mjs` `ariaSnapshot()` (compact role/name tree, far fewer tokens).
 - `click <selector>` — `el.click()`.

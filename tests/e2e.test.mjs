@@ -473,7 +473,12 @@ test('an op missing from the host names the module version instead of "unknown o
     await assert.rejects(() => page.layerTree(), (e) => {
       assert.match(e.message, /needs the "layertree" op/);
       assert.match(e.message, /host module 0\.3\.0/, 'names the host module build');
-      assert.match(e.message, /GIT_TAG/, 'says how to fix it');
+      assert.match(e.message, /rebuild the plugin/, 'says how to fix it');
+      // Consumers embed the module by FetchContent, git submodule, or a vendored
+      // copy. Prescribing one sends the other two hunting for something that does
+      // not exist in their build, so the advice must not name a single mechanism.
+      assert.match(e.message, /submodule/, 'covers submodule integrations too');
+      assert.doesNotMatch(e.message, /bump its FetchContent/, 'does not prescribe one integration');
       return true;
     });
     page.close();

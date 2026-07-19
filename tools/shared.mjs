@@ -79,8 +79,9 @@ export function requireOp(caps, op, api) {
     if (caps === null || caps.ops.includes(op))
         return; // null = handshake unavailable; stay out of the way
     throw new Error(`${api} needs the "${op}" op, which the host's juce_webview_agent_bridge module does not provide. `
-        + `The plugin was built against an older module than this client expects — bump its FetchContent `
-        + `GIT_TAG and rebuild the plugin.\n  ${describePairing(caps)}\n  host ops: ${caps.ops.join(', ')}`);
+        + `The plugin was built against an older module than this client expects — update the module it `
+        + `builds against (FetchContent pin, git submodule, or vendored copy) and rebuild the plugin.`
+        + `\n  ${describePairing(caps)}\n  host ops: ${caps.ops.join(', ')}`);
 }
 /** Locate a running bridge's {port, token}.
  *  The host writes them on start so clients never guess: each instance registers
