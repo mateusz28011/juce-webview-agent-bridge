@@ -560,6 +560,49 @@ TEST_CASE ("WebAgentBridge streams sink events only to authenticated connections
     bridge.stop();
 }
 
+TEST_CASE ("WebAgentBridge survives writing to a client that vanished mid-stream (no SIGPIPE)",
+           "[web_agent][bridge]")
+{
+    auto disc = tempDisc ("wab_disc_sigpipe.json");
+    WebAgentBridge bridge;
+    const int port = bridge.start (19071, disc);
+    REQUIRE (port != 0);
+    const auto token = tokenOf (disc);
+
+    // An authenticated client that drops abruptly: the peer is gone, but the
+    // server's sink/accept threads don't know it yet.
+    {
+        auto doomed = authedClient (port, token);
+        doomed->close();
+    }
+
+    // Fan a burst of sink events at the now-dead connection. Before the fix the
+    // first ::send() to the closed fd raised SIGPIPE, whose default action killed
+    // this whole process (exit 141) — exactly the crash seen when an agent tore
+    // the socket down during a page reload. The writer must instead see EPIPE,
+    // reap the connection and keep running.
+    for (int i = 0; i < 200; ++i)
+    {
+        juce::DynamicObject::Ptr e (new juce::DynamicObject());
+        e->setProperty ("kind", "console");
+        e->setProperty ("n", i);
+        bridge.pushSink (juce::var (e.get()));
+    }
+
+    // Let the sink writer drain and the accept loop prune the dead connection.
+    pumpMessages (200);
+
+    // Unharmed: still running, and a fresh client authenticates and is served.
+    REQUIRE (bridge.isRunning());
+    auto fresh = authedClient (port, token);
+    REQUIRE (sendLine (*fresh, R"({"id":70,"op":"ping"})"));
+    const auto r = recvReply (*fresh, 2000);
+    REQUIRE ((bool) r.getProperty ("ok", false));
+    REQUIRE ((int) r.getProperty ("id", -1) == 70);
+
+    bridge.stop();
+}
+
 TEST_CASE ("WebAgentBridge fails open (no auth) when it cannot publish the discovery file",
            "[web_agent][bridge]")
 {

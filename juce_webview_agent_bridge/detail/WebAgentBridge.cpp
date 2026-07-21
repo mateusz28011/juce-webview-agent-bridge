@@ -24,7 +24,9 @@
 #include <vector>
 
 #if ! JUCE_WINDOWS
- #include <sys/stat.h> // chmod() — 0600 on the plaintext-token discovery file
+ #include <cerrno>
+ #include <sys/socket.h> // ::send()/MSG_NOSIGNAL/SO_NOSIGPIPE — keep SIGPIPE from killing the host
+ #include <sys/stat.h>   // chmod() — 0600 on the plaintext-token discovery file
 #endif
 
 namespace web_agent
@@ -80,6 +82,59 @@ juce::var makeShotReply (const juce::var& id, bool ok, const juce::String& path,
     if (error.isNotEmpty()) r->setProperty ("error", error);
     return juce::var (r.get());
 }
+
+// SIGPIPE avoidance. juce::StreamingSocket::write() is a single ::send(fd, .., 0):
+// when the peer has closed mid-write it raises SIGPIPE, whose default action kills
+// the whole process (observed: exit 141 when an agent tears the socket down during
+// a page reload). A debug-only guest module must NEVER take down its host, and it
+// must do so WITHOUT mutating the host's process-global signal disposition. So:
+//
+//   * Apple/BSD: SO_NOSIGPIPE is set per accepted socket (configureAcceptedSocket),
+//     then the raw ::send() loop below runs with flags 0 — broken writes return EPIPE.
+//   * Linux/Android: no SO_NOSIGPIPE — the ::send() loop uses MSG_NOSIGNAL per call.
+//   * Windows: no SIGPIPE at all; the JUCE path is already safe.
+//
+// configureAcceptedSocket() is a no-op wherever SO_NOSIGPIPE is unavailable.
+void configureAcceptedSocket ([[maybe_unused]] juce::StreamingSocket& socket)
+{
+   #if defined(SO_NOSIGPIPE)
+    const int fd = socket.getRawSocketHandle();
+    if (fd >= 0)
+    {
+        int one = 1;
+        ::setsockopt (fd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof (one));
+    }
+   #endif
+}
+
+// Write every byte, or report the connection dead. Returns false on a broken peer
+// (EPIPE/ECONNRESET) or any send error so the caller stops writing to it.
+bool writeAll (juce::StreamingSocket& socket, const char* data, size_t len)
+{
+   #if JUCE_WINDOWS
+    // No SIGPIPE on Windows; a short write means the peer is gone.
+    return socket.write (data, (int) len) == (int) len;
+   #else
+    const int fd = socket.getRawSocketHandle();
+    if (fd < 0) return false;
+
+   #if defined(MSG_NOSIGNAL)
+    constexpr int sendFlags = MSG_NOSIGNAL; // Linux/Android: per-call SIGPIPE suppression
+   #else
+    constexpr int sendFlags = 0;            // Apple/BSD: SO_NOSIGPIPE set on the socket
+   #endif
+
+    size_t sent = 0;
+    while (sent < len)
+    {
+        const auto n = ::send (fd, data + sent, len - sent, sendFlags);
+        if (n > 0)                    { sent += (size_t) n; continue; }
+        if (n < 0 && errno == EINTR)  continue;         // interrupted: retry
+        return false;                                   // EPIPE/ECONNRESET/other: peer gone
+    }
+    return true;
+   #endif
+}
 } // namespace
 
 //==============================================================================
@@ -101,7 +156,8 @@ struct WebAgentBridge::Impl : public std::enable_shared_from_this<WebAgentBridge
             if (socket != nullptr && socket->isConnected())
             {
                 const auto* utf8 = line.toRawUTF8();
-                socket->write (utf8, (int) std::strlen (utf8));
+                if (! writeAll (*socket, utf8, std::strlen (utf8)))
+                    alive.store (false); // peer gone / broken pipe: reap us instead of retrying
             }
         }
 
@@ -554,6 +610,7 @@ struct WebAgentBridge::Impl : public std::enable_shared_from_this<WebAgentBridge
             }
             if (! running.load()) { delete raw; break; }
 
+            configureAcceptedSocket (*raw); // SO_NOSIGPIPE (Apple/BSD): a mid-write disconnect must not kill the host
             auto conn = std::make_shared<Connection> (std::unique_ptr<juce::StreamingSocket> (raw));
             conn->authed.store (token.isEmpty()); // no token => open
             {

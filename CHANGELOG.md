@@ -5,6 +5,16 @@ commit comparisons are available from the linked GitHub Releases.
 
 ## [Unreleased]
 
+### Fixed
+
+- The bridge no longer crashes the host process with `SIGPIPE` (exit 141) when a
+  client disconnects while the bridge is writing to it — e.g. an agent that tears
+  the socket down during a page reload. Writes to accepted client sockets now
+  suppress `SIGPIPE` per socket (`SO_NOSIGPIPE` on macOS/BSD, `MSG_NOSIGNAL` on
+  Linux) without touching the host process's global signal disposition, and a
+  broken write reaps the connection instead of retrying it. Windows was
+  unaffected.
+
 ## [0.5.1] - 2026-07-19
 
 ### Fixed
