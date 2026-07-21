@@ -5,6 +5,8 @@ commit comparisons are available from the linked GitHub Releases.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-07-21
+
 ### Added
 
 - New `shot_stream` op captures the host window at frame rate to a directory of
@@ -207,7 +209,8 @@ There are no package API changes in this release.
 - Zero-dependency CLI, Playwright-shaped E2E client, agent skill, and standalone
   JavaScript and C++ test suites.
 
-[Unreleased]: https://github.com/mateusz28011/juce-webview-agent-bridge/compare/v0.5.2...HEAD
+[Unreleased]: https://github.com/mateusz28011/juce-webview-agent-bridge/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/mateusz28011/juce-webview-agent-bridge/releases/tag/v0.6.0
 [0.5.2]: https://github.com/mateusz28011/juce-webview-agent-bridge/releases/tag/v0.5.2
 [0.5.1]: https://github.com/mateusz28011/juce-webview-agent-bridge/releases/tag/v0.5.1
 [0.5.0]: https://github.com/mateusz28011/juce-webview-agent-bridge/releases/tag/v0.5.0
