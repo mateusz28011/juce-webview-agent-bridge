@@ -157,7 +157,8 @@ npx juce-webview-agent-bridge shot /tmp/panel.png "#panel"  # crop to an element
 ```
 
 Other commands: `hello`, `dom`, `click`, `fill`, `capture`, `backlog`,
-`layerdebug`, and `layertree`. Port and token are normally auto-discovered.
+`layerdebug`, `layertree`, and `instances` (list running bridges without
+connecting). Port and token are normally auto-discovered.
 
 ## E2E (Playwright-style)
 

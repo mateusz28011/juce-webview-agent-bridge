@@ -27,6 +27,7 @@
  #include <cerrno>
  #include <sys/socket.h> // ::send()/MSG_NOSIGNAL/SO_NOSIGPIPE — keep SIGPIPE from killing the host
  #include <sys/stat.h>   // chmod() — 0600 on the plaintext-token discovery file
+ #include <unistd.h>     // getpid() — process id in the discovery record
 #endif
 
 namespace web_agent
@@ -149,6 +150,17 @@ bool writeAll (juce::StreamingSocket& socket, const char* data, size_t len)
     return true;
    #endif
 }
+
+// Host process id, published in the discovery record so a client can tell several
+// instances of the same plugin apart (a bare "lowest port" says nothing about which).
+int currentProcessId()
+{
+   #if JUCE_WINDOWS
+    return (int) ::GetCurrentProcessId();
+   #else
+    return (int) ::getpid();
+   #endif
+}
 } // namespace
 
 //==============================================================================
@@ -201,6 +213,25 @@ struct WebAgentBridge::Impl : public std::enable_shared_from_this<WebAgentBridge
     juce::String token;          // session auth token ("" = auth disabled)
     juce::File   discoveryFile;  // {port,token} written here for client auto-discovery (legacy single file)
     juce::File   instanceFile;   // per-port file in <dir>/.web_agent_bridge.d so several hosts don't collide
+    juce::String startedAt;      // ISO-8601, captured at start(); part of the discovery record
+    juce::String instanceLabel;  // optional embedder-supplied label to disambiguate instances
+
+    // The {port,token,...} record published for discovery. Beyond the port/token a
+    // client needs to connect, it carries identity so a user (or a client's instance
+    // list) can tell several copies of the same plugin apart. `pid`/`processName`/
+    // `startedAt` are module-derived; `label` is whatever the embedder set.
+    juce::DynamicObject::Ptr makeDiscoveryRecord() const
+    {
+        juce::DynamicObject::Ptr d (new juce::DynamicObject());
+        d->setProperty ("port", port);
+        d->setProperty ("token", token);
+        d->setProperty ("pid", currentProcessId());
+        d->setProperty ("processName",
+                        juce::File::getSpecialLocation (juce::File::hostApplicationPath).getFileNameWithoutExtension());
+        d->setProperty ("startedAt", startedAt);
+        if (instanceLabel.isNotEmpty()) d->setProperty ("label", instanceLabel);
+        return d;
+    }
 
     // Sink writer: console/network events are enqueued (cheap) and broadcast on a
     // dedicated thread, so the message thread is never blocked by socket I/O.
@@ -702,9 +733,10 @@ int WebAgentBridge::start (int preferredPort, juce::File discoveryFileOverride,
         return 0;
     }
 
-    impl->listener = std::move (listener);
-    impl->port     = port;
-    impl->token    = juce::Uuid().toString();
+    impl->listener  = std::move (listener);
+    impl->port      = port;
+    impl->token     = juce::Uuid().toString();
+    impl->startedAt = juce::Time::getCurrentTime().toISO8601 (true);
     impl->running.store (true);
 
     // Announce {port, token} so clients auto-discover without guessing the port.
@@ -716,9 +748,7 @@ int WebAgentBridge::start (int preferredPort, juce::File discoveryFileOverride,
                               : juce::File::getSpecialLocation (juce::File::userHomeDirectory)
                                     .getChildFile (".web_agent_bridge.json");
     {
-        juce::DynamicObject::Ptr d (new juce::DynamicObject());
-        d->setProperty ("port", port);
-        d->setProperty ("token", impl->token);
+        auto d = impl->makeDiscoveryRecord();
         const bool wrote = impl->discoveryFile.replaceWithText (juce::JSON::toString (juce::var (d.get())));
         DBG ("[web_agent] discovery " << (wrote ? "wrote " : "FAILED ") << impl->discoveryFile.getFullPathName());
         if (wrote)
@@ -759,9 +789,7 @@ int WebAgentBridge::start (int preferredPort, juce::File discoveryFileOverride,
         dir.createDirectory();
         impl->instanceFile = dir.getChildFile (juce::String (port) + ".json");
 
-        juce::DynamicObject::Ptr d (new juce::DynamicObject());
-        d->setProperty ("port", port);
-        d->setProperty ("token", impl->token);
+        auto d = impl->makeDiscoveryRecord();
         if (impl->instanceFile.replaceWithText (juce::JSON::toString (juce::var (d.get()))))
         {
            #if ! JUCE_WINDOWS
@@ -849,6 +877,11 @@ void WebAgentBridge::setSinkLimits (int queueMax, int historyMax)
 {
     impl->sinkQueueMax.store   ((size_t) juce::jmax (1, queueMax)); // a 0 queue would spin; floor at 1
     impl->sinkHistoryMax.store ((size_t) juce::jmax (0, historyMax));
+}
+
+void WebAgentBridge::setInstanceLabel (const juce::String& label)
+{
+    impl->instanceLabel = label; // published by makeDiscoveryRecord() at start()
 }
 
 void WebAgentBridge::pushSink (const juce::var& event)

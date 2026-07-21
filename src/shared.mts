@@ -15,7 +15,34 @@ import type { Socket } from 'node:net';
 export interface Discovery {
   port?: number;
   token?: string;
+  /** Instance identity (added by the host so several copies of the same plugin can
+   *  be told apart). `pid`/`processName`/`startedAt` are module-derived; `label` is
+   *  whatever the embedder set via setInstanceLabel(). All absent on older hosts. */
+  pid?: number;
+  processName?: string;
+  startedAt?: string;
+  label?: string;
   [key: string]: unknown;
+}
+
+/** Parse a discovery JSON file, or null if missing/unreadable/invalid. */
+function readDiscoveryFile(p: string): Discovery | null {
+  try { return JSON.parse(fs.readFileSync(p, 'utf8')) as Discovery; } catch { return null; }
+}
+
+/** Enumerate every registered bridge instance — the per-port files under
+ *  `<home>/.web_agent_bridge.d`, sorted by port. Each entry is the full discovery
+ *  record (`{port, token, pid, processName, startedAt, label?}`), so a client can
+ *  present a readable instance list instead of blindly picking the lowest port. */
+export function listInstances(): Array<Discovery & { port: number }> {
+  const dir = path.join(os.homedir(), '.web_agent_bridge.d');
+  try {
+    return fs.readdirSync(dir)
+      .filter((f) => f.endsWith('.json'))
+      .map((f) => readDiscoveryFile(path.join(dir, f)))
+      .filter((d): d is Discovery & { port: number } => d !== null && typeof d.port === 'number')
+      .sort((a, b) => a.port - b.port);
+  } catch { return []; }
 }
 
 /** The port the host tries first (it scans upward on collision); clients fall
@@ -160,17 +187,11 @@ export function requireOp(caps: BridgeCapabilities | null, op: string, api: stri
 export function loadDiscovery(preferredPort?: number): Discovery {
   const home = os.homedir();
   const dir = path.join(home, '.web_agent_bridge.d');
-  const readJson = (p: string): Discovery | null => { try { return JSON.parse(fs.readFileSync(p, 'utf8')) as Discovery; } catch { return null; } };
-  if (preferredPort) { const d = readJson(path.join(dir, `${preferredPort}.json`)); if (d) return d; }
-  try {
-    const insts = fs.readdirSync(dir).filter((f) => f.endsWith('.json'))
-      .map((f) => readJson(path.join(dir, f)))
-      .filter((d): d is Discovery & { port: number } => d !== null && typeof d.port === 'number')
-      .sort((a, b) => a.port - b.port);
-    if (preferredPort) { const m = insts.find((d) => d.port === preferredPort); if (m) return m; }
-    if (insts.length) return insts[0];
-  } catch { /* no dir -> fall through to legacy */ }
-  return readJson(path.join(home, '.web_agent_bridge.json')) || {};
+  if (preferredPort) { const d = readDiscoveryFile(path.join(dir, `${preferredPort}.json`)); if (d) return d; }
+  const insts = listInstances();
+  if (preferredPort) { const m = insts.find((d) => d.port === preferredPort); if (m) return m; }
+  if (insts.length) return insts[0];
+  return readDiscoveryFile(path.join(home, '.web_agent_bridge.json')) || {};
 }
 
 /** Attach an NDJSON reader to a socket: reassembles newline-delimited JSON

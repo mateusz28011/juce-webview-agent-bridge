@@ -2,8 +2,22 @@ import type { Socket } from 'node:net';
 export interface Discovery {
     port?: number;
     token?: string;
+    /** Instance identity (added by the host so several copies of the same plugin can
+     *  be told apart). `pid`/`processName`/`startedAt` are module-derived; `label` is
+     *  whatever the embedder set via setInstanceLabel(). All absent on older hosts. */
+    pid?: number;
+    processName?: string;
+    startedAt?: string;
+    label?: string;
     [key: string]: unknown;
 }
+/** Enumerate every registered bridge instance — the per-port files under
+ *  `<home>/.web_agent_bridge.d`, sorted by port. Each entry is the full discovery
+ *  record (`{port, token, pid, processName, startedAt, label?}`), so a client can
+ *  present a readable instance list instead of blindly picking the lowest port. */
+export declare function listInstances(): Array<Discovery & {
+    port: number;
+}>;
 /** The port the host tries first (it scans upward on collision); clients fall
  *  back to it when no discovery file exists. Mirrors WebAgentBridge::start(). */
 export declare const DEFAULT_PORT = 8930;

@@ -113,6 +113,12 @@ public:
         Take effect immediately. */
     void setSinkLimits (int queueMax, int historyMax);
 
+    /** Optional human-readable label published in this instance's discovery record
+        (`label`), so a client listing several instances of the same plugin can show
+        which is which. The module already advertises `pid`, `processName`, and
+        `startedAt`; the embedder alone knows a meaningful name. Set before start(). */
+    void setInstanceLabel (const juce::String& label);
+
 private:
     struct Impl;
     std::shared_ptr<Impl> impl;

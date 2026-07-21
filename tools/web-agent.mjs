@@ -19,13 +19,14 @@
  *   juce-webview-agent-bridge layertree              dump the remote CALayer tree as text (macOS, programmatic layer census)
  *   juce-webview-agent-bridge ping                   liveness check
  *   juce-webview-agent-bridge hello                  capabilities handshake (version, platform, ops, screenshotAvailable)
+ *   juce-webview-agent-bridge instances              list running bridges (port, label, process, pid) — no connection
  *
  * Options:  --port <n>   (default $WEB_AGENT_PORT or 8930)
  *           --host <h>   (default 127.0.0.1)
  */
 import net from 'node:net';
 import path from 'node:path';
-import { BridgeOpError, DEFAULT_PORT, assertProtocolSupported, loadDiscovery, onJsonLines, parseHello, requireOp } from './shared.mjs';
+import { BridgeOpError, DEFAULT_PORT, assertProtocolSupported, listInstances, loadDiscovery, onJsonLines, parseHello, requireOp } from './shared.mjs';
 const argv = process.argv.slice(2);
 const opt = (name, def) => {
     const i = argv.indexOf(name);
@@ -125,6 +126,26 @@ function requireHostOp(op, api) {
     requireOp(hostCaps, op, api);
 }
 async function main() {
+    // `instances` is purely local — it enumerates discovery files and never opens a
+    // socket, so handle it before any connection or handshake.
+    if (cmd === 'instances') {
+        const insts = listInstances();
+        if (!insts.length) {
+            console.log('no running bridge instances found');
+            return;
+        }
+        for (const d of insts) {
+            const bits = [
+                `:${d.port}`,
+                d.label ? `"${d.label}"` : undefined,
+                d.processName,
+                d.pid !== undefined ? `pid ${d.pid}` : undefined,
+                d.startedAt,
+            ].filter(Boolean);
+            console.log(bits.join('  '));
+        }
+        return;
+    }
     // One handshake per run, before any command runs: a host advertising a newer
     // protocol major is refused here rather than half-served command by command.
     if (cmd && !DIAGNOSTIC_CMDS.has(cmd))

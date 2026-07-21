@@ -173,6 +173,35 @@ test('auth: a missing token surfaces the bridge error and a non-zero exit', asyn
   }
 });
 
+test('instances: lists every registered bridge with its identity, no connection', async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'wab-home-'));
+  tempDirs.push(home);
+  const d = path.join(home, '.web_agent_bridge.d');
+  fs.mkdirSync(d);
+  fs.writeFileSync(path.join(d, '8930.json'), JSON.stringify(
+    { port: 8930, token: 'T', pid: 111, processName: 'Live', startedAt: '2026-07-21T10:00:00.000Z', label: 'Track 3 EQ' }));
+  fs.writeFileSync(path.join(d, '8931.json'), JSON.stringify(
+    { port: 8931, token: 'T', pid: 222, processName: 'Reaper' }));
+
+  const r = await runClient(['instances'], { home }); // no bridge running — purely local
+  assert.equal(r.code, 0);
+  assert.match(r.out, /:8930\b/);
+  assert.match(r.out, /Track 3 EQ/);
+  assert.match(r.out, /Live/);
+  assert.match(r.out, /pid 111/);
+  assert.match(r.out, /:8931\b/);
+  assert.match(r.out, /Reaper/);
+  assert.ok(r.out.indexOf(':8930') < r.out.indexOf(':8931'), 'sorted by port');
+});
+
+test('instances: reports none when no bridge is registered', async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'wab-home-'));
+  tempDirs.push(home);
+  const r = await runClient(['instances'], { home });
+  assert.equal(r.code, 0);
+  assert.match(r.out, /no running bridge instances/);
+});
+
 test('discovery: enumerates .web_agent_bridge.d, default = lowest port, --port selects one', async () => {
   const a = await startMockBridge();
   const b = await startMockBridge();

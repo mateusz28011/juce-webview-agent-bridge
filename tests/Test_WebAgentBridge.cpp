@@ -143,10 +143,31 @@ TEST_CASE ("WebAgentBridge publishes {port,token} to the discovery file, and rem
     const auto v = juce::JSON::parse (disc.loadFileAsString());
     REQUIRE ((int) v.getProperty ("port", 0) == port);
     REQUIRE (v.getProperty ("token", juce::var()).toString().isNotEmpty());
+    // Instance identity: module-derived fields are always present; an unset label is omitted.
+    REQUIRE ((int) v.getProperty ("pid", 0) > 0);
+    REQUIRE (v.getProperty ("processName", juce::var()).toString().isNotEmpty());
+    REQUIRE (v.getProperty ("startedAt", juce::var()).toString().isNotEmpty());
+    REQUIRE_FALSE (v.hasProperty ("label"));
 
     bridge.stop();
     REQUIRE_FALSE (bridge.isRunning());
     REQUIRE_FALSE (disc.existsAsFile()); // stop() deletes the discovery file
+}
+
+TEST_CASE ("WebAgentBridge publishes an embedder-supplied instance label", "[web_agent][bridge]")
+{
+    auto disc = tempDisc ("wab_disc_label.json");
+    WebAgentBridge bridge;
+    bridge.setInstanceLabel ("Track 3 EQ");
+    const int port = bridge.start (19101, disc);
+    REQUIRE (port != 0);
+    REQUIRE (disc.existsAsFile());
+
+    const auto v = juce::JSON::parse (disc.loadFileAsString());
+    REQUIRE (v.getProperty ("label", juce::var()).toString() == "Track 3 EQ");
+    REQUIRE ((int) v.getProperty ("pid", 0) > 0);
+
+    bridge.stop();
 }
 
 TEST_CASE ("WebAgentBridge requires the session token before serving any op", "[web_agent][bridge]")

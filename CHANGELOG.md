@@ -7,6 +7,11 @@ commit comparisons are available from the linked GitHub Releases.
 
 ### Added
 
+- Discovery records now carry instance identity — `pid`, `processName`,
+  `startedAt`, and an optional `label` set via `setInstanceLabel()` — so several
+  copies of the same plugin in a host can be told apart instead of guessing from
+  the port. The npm client exports `listInstances()`, and `web-agent instances`
+  lists every running bridge (port, label, process, pid) without connecting.
 - `setMaxConnections()` caps simultaneously-connected clients (default 16; one
   blocking read thread runs per client), so a local process can no longer exhaust
   host threads by opening many connections — beyond the cap a connection is

@@ -9,6 +9,32 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
+/** Parse a discovery JSON file, or null if missing/unreadable/invalid. */
+function readDiscoveryFile(p) {
+    try {
+        return JSON.parse(fs.readFileSync(p, 'utf8'));
+    }
+    catch {
+        return null;
+    }
+}
+/** Enumerate every registered bridge instance — the per-port files under
+ *  `<home>/.web_agent_bridge.d`, sorted by port. Each entry is the full discovery
+ *  record (`{port, token, pid, processName, startedAt, label?}`), so a client can
+ *  present a readable instance list instead of blindly picking the lowest port. */
+export function listInstances() {
+    const dir = path.join(os.homedir(), '.web_agent_bridge.d');
+    try {
+        return fs.readdirSync(dir)
+            .filter((f) => f.endsWith('.json'))
+            .map((f) => readDiscoveryFile(path.join(dir, f)))
+            .filter((d) => d !== null && typeof d.port === 'number')
+            .sort((a, b) => a.port - b.port);
+    }
+    catch {
+        return [];
+    }
+}
 /** The port the host tries first (it scans upward on collision); clients fall
  *  back to it when no discovery file exists. Mirrors WebAgentBridge::start(). */
 export const DEFAULT_PORT = 8930;
@@ -116,32 +142,20 @@ export function requireOp(caps, op, api) {
 export function loadDiscovery(preferredPort) {
     const home = os.homedir();
     const dir = path.join(home, '.web_agent_bridge.d');
-    const readJson = (p) => { try {
-        return JSON.parse(fs.readFileSync(p, 'utf8'));
-    }
-    catch {
-        return null;
-    } };
     if (preferredPort) {
-        const d = readJson(path.join(dir, `${preferredPort}.json`));
+        const d = readDiscoveryFile(path.join(dir, `${preferredPort}.json`));
         if (d)
             return d;
     }
-    try {
-        const insts = fs.readdirSync(dir).filter((f) => f.endsWith('.json'))
-            .map((f) => readJson(path.join(dir, f)))
-            .filter((d) => d !== null && typeof d.port === 'number')
-            .sort((a, b) => a.port - b.port);
-        if (preferredPort) {
-            const m = insts.find((d) => d.port === preferredPort);
-            if (m)
-                return m;
-        }
-        if (insts.length)
-            return insts[0];
+    const insts = listInstances();
+    if (preferredPort) {
+        const m = insts.find((d) => d.port === preferredPort);
+        if (m)
+            return m;
     }
-    catch { /* no dir -> fall through to legacy */ }
-    return readJson(path.join(home, '.web_agent_bridge.json')) || {};
+    if (insts.length)
+        return insts[0];
+    return readDiscoveryFile(path.join(home, '.web_agent_bridge.json')) || {};
 }
 /** Attach an NDJSON reader to a socket: reassembles newline-delimited JSON
  *  lines across TCP chunks (multi-byte-safe via StringDecoder) and calls fn
