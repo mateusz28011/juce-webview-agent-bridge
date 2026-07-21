@@ -42,12 +42,12 @@ function startMockBridge({ onEval, requireToken = 'T', splitUtf8 = false, afterA
           if (m.token === requireToken) authed = true;
         }
         const reply = (obj) => sock.write(JSON.stringify({ id: m.id, ...obj }) + '\n');
-        if (requireToken && !authed) { reply({ op: m.op || 'auth', ok: false, error: 'auth required' }); continue; }
+        if (requireToken && !authed) { reply({ op: m.op || 'auth', ok: false, error: { code: 'AUTH_REQUIRED', message: 'auth required' } }); continue; }
         if (m.op === 'auth') { reply({ op: 'auth', ok: true }); if (afterAuth) afterAuth(sock); continue; }
         if (m.op === 'ping') { reply({ op: 'ping', ok: true }); continue; }
         if (m.op === 'hello') {
           // `hello` overrides let a test stand in for an older or newer host.
-          reply({ op: 'hello', ok: true, protocolVersion: 1, platform: 'mac', moduleVersion: '0.4.0',
+          reply({ op: 'hello', ok: true, protocolVersion: 2, platform: 'mac', moduleVersion: '0.4.0',
                   ops: ['ping', 'eval', 'shot'], screenshotAvailable: false, authRequired: true, ...hello });
           continue;
         }
@@ -73,7 +73,7 @@ function startMockBridge({ onEval, requireToken = 'T', splitUtf8 = false, afterA
           reply({ op: 'shot', ok: true, path: m.path || '/tmp/wab-shot.png' });
           continue;
         }
-        reply({ op: m.op, ok: false, error: 'unknown op: ' + m.op });
+        reply({ op: m.op, ok: false, error: { code: 'UNKNOWN_OP', message: 'unknown op: ' + m.op } });
       }
     });
   });
@@ -173,6 +173,35 @@ test('auth: a missing token surfaces the bridge error and a non-zero exit', asyn
   }
 });
 
+test('instances: lists every registered bridge with its identity, no connection', async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'wab-home-'));
+  tempDirs.push(home);
+  const d = path.join(home, '.web_agent_bridge.d');
+  fs.mkdirSync(d);
+  fs.writeFileSync(path.join(d, '8930.json'), JSON.stringify(
+    { port: 8930, token: 'T', pid: 111, processName: 'Live', startedAt: '2026-07-21T10:00:00.000Z', label: 'Track 3 EQ' }));
+  fs.writeFileSync(path.join(d, '8931.json'), JSON.stringify(
+    { port: 8931, token: 'T', pid: 222, processName: 'Reaper' }));
+
+  const r = await runClient(['instances'], { home }); // no bridge running — purely local
+  assert.equal(r.code, 0);
+  assert.match(r.out, /:8930\b/);
+  assert.match(r.out, /Track 3 EQ/);
+  assert.match(r.out, /Live/);
+  assert.match(r.out, /pid 111/);
+  assert.match(r.out, /:8931\b/);
+  assert.match(r.out, /Reaper/);
+  assert.ok(r.out.indexOf(':8930') < r.out.indexOf(':8931'), 'sorted by port');
+});
+
+test('instances: reports none when no bridge is registered', async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'wab-home-'));
+  tempDirs.push(home);
+  const r = await runClient(['instances'], { home });
+  assert.equal(r.code, 0);
+  assert.match(r.out, /no running bridge instances/);
+});
+
 test('discovery: enumerates .web_agent_bridge.d, default = lowest port, --port selects one', async () => {
   const a = await startMockBridge();
   const b = await startMockBridge();
@@ -204,7 +233,7 @@ test('hello: prints the capabilities handshake', async () => {
     const home = tempHomeWith({ port, token: 'T' });
     const { code, out } = await runClient(['hello'], { home });
     assert.equal(code, 0);
-    assert.match(out, /"protocolVersion": 1/);
+    assert.match(out, /"protocolVersion": 2/);
     assert.match(out, /"platform": "mac"/);
     assert.match(out, /"screenshotAvailable": false/);
   } finally {

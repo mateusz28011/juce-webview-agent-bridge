@@ -5,12 +5,52 @@ commit comparisons are available from the linked GitHub Releases.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-07-21
+
+### Added
+
+- The sink stream now emits a `navigation` event (`data: {url, title}`) on every
+  page (re)load, so a client can detect that a reload wiped its injected state
+  (recorders, hooks, page globals) instead of the reload passing silently — the
+  failure that otherwise looks exactly like "nothing happened". Consume it with
+  `page.on('navigation')` / `page.waitForEvent('navigation')`, or the `logs` stream.
+- `withCapture()` now takes a `CaptureOptions` argument selecting which page hooks
+  the injected script installs — console, errors, resource timing, fetch, XHR,
+  WebSocket, EventSource, and sendBeacon (all on by default) — so a host page whose
+  own instrumentation collides with one of them can disable just that hook.
+- Discovery records now carry instance identity — `pid`, `processName`,
+  `startedAt`, and an optional `label` set via `setInstanceLabel()` — so several
+  copies of the same plugin in a host can be told apart instead of guessing from
+  the port. The npm client exports `listInstances()`, and `web-agent instances`
+  lists every running bridge (port, label, process, pid) without connecting.
+- `setMaxConnections()` caps simultaneously-connected clients (default 16; one
+  blocking read thread runs per client), so a local process can no longer exhaust
+  host threads by opening many connections — beyond the cap a connection is
+  accepted and immediately closed. `setSinkLimits()` makes the sink broadcast
+  queue and `sink_replay` history bounds tunable instead of compile-time constants.
+
 ### Changed
 
+- **Breaking (protocol 2):** op-reply errors are now a structured object,
+  `error: { code, message, details? }`, instead of a plain `error` string. `code`
+  is a stable machine-readable enum (`AUTH_REQUIRED`, `UNKNOWN_OP`, `NO_WEBVIEW`,
+  `EVAL_ERROR`, `SCREENSHOT_UNAVAILABLE`, `SCREENSHOT_FAILED`, `LAYER_UNAVAILABLE`)
+  so clients branch on the error type instead of matching message text. The bridge
+  advertises `protocolVersion: 2`; the npm clients now throw an exported
+  `BridgeOpError` carrying `.code`. Sink `error` events are unaffected.
 - GitHub Release notes are now filled automatically from the released
   `CHANGELOG.md` section (plus the comparison link) instead of GitHub's raw
   commit list, so the changelog is the single source of truth for release notes
   and there is no hand-written release body to drift or forget.
+
+### Security
+
+- The bridge now fails **closed** when it cannot publish the session token (its
+  discovery file is unwritable): `start()` refuses to run and returns 0 instead
+  of silently disabling authentication and accepting any loopback client — the
+  old fail-open default was unsafe for a tool that executes arbitrary JavaScript.
+  An embedder can opt back into an open, tokenless bridge with the new
+  `start(..., allowUnauthenticatedLoopback: true)` argument.
 
 ## [0.5.2] - 2026-07-21
 
@@ -150,7 +190,8 @@ There are no package API changes in this release.
 - Zero-dependency CLI, Playwright-shaped E2E client, agent skill, and standalone
   JavaScript and C++ test suites.
 
-[Unreleased]: https://github.com/mateusz28011/juce-webview-agent-bridge/compare/v0.5.2...HEAD
+[Unreleased]: https://github.com/mateusz28011/juce-webview-agent-bridge/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/mateusz28011/juce-webview-agent-bridge/releases/tag/v0.6.0
 [0.5.2]: https://github.com/mateusz28011/juce-webview-agent-bridge/releases/tag/v0.5.2
 [0.5.1]: https://github.com/mateusz28011/juce-webview-agent-bridge/releases/tag/v0.5.1
 [0.5.0]: https://github.com/mateusz28011/juce-webview-agent-bridge/releases/tag/v0.5.0

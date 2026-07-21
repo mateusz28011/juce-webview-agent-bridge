@@ -35,7 +35,7 @@ function fakeResponse(status, body) {
 
 // Build a sandbox, install the capture script into it, and return handles to drive
 // it. `sink` accrues every record the script sends to __webAgentSink.
-function install({ capture = false, withFetch = false, withXHR = false, withWS = false, withES = false, withBeacon = false, fetchResp = fakeResponse(200, 'BODY'), fetchReject = null, xhr = {} } = {}) {
+function install({ capture = false, withFetch = false, withXHR = false, withWS = false, withES = false, withBeacon = false, fetchResp = fakeResponse(200, 'BODY'), fetchReject = null, xhr = {}, hooks = null } = {}) {
   const sink = [];
   const chained = []; // calls that reached the ORIGINAL console (proves the patch chains)
   const listeners = {};
@@ -53,6 +53,8 @@ function install({ capture = false, withFetch = false, withXHR = false, withWS =
   win.console = {};
   for (const lvl of ['log', 'info', 'warn', 'error', 'debug'])
     win.console[lvl] = (...a) => chained.push([lvl, ...a]); // the script captures these as `orig`
+  win.location = { href: 'https://app.test/page' };
+  win.document = { title: 'App' };
   win.performance = { setResourceTimingBufferSize() {} };
   win.PerformanceObserver = class {
     constructor(cb) { this.cb = cb; observers.push(this); }
@@ -98,6 +100,8 @@ function install({ capture = false, withFetch = false, withXHR = false, withWS =
     win._beacons = beacons;
   }
 
+  if (hooks) win.__webAgentCaptureHooks = hooks; // withCapture publishes this to select hooks
+
   const ctx = vm.createContext(win);
   vm.runInContext(SCRIPT, ctx, { filename: 'CaptureScript.h' });
   // Drop the synthetic "[web_agent] capture installed" line so tests assert on real events.
@@ -124,6 +128,34 @@ test('console.* is patched: forwards level + stringified args and chains to the 
   assert.equal(rec.data.args[0], 'boom');
   assert.equal(rec.data.args[1], '{"a":1}', 'objects are JSON-stringified');
   assert.ok(env.chained.some((c) => c[0] === 'error' && c[1] === 'boom'), 'patched console still calls the original');
+});
+
+test('a navigation event is emitted on install (page (re)load signal)', () => {
+  const env = install();
+  const nav = env.real().find((r) => r.kind === 'navigation');
+  assert.ok(nav, 'navigation event emitted on load');
+  assert.equal(nav.data.url, 'https://app.test/page');
+  assert.equal(nav.data.title, 'App');
+});
+
+test('the navigation hook can be disabled', () => {
+  const env = install({ hooks: { navigation: false } });
+  assert.equal(env.real().filter((r) => r.kind === 'navigation').length, 0, 'no navigation event when disabled');
+});
+
+test('individual capture hooks can be disabled (withCapture options)', () => {
+  // console off + fetch off, errors on: those APIs are left un-patched, errors still flow.
+  const env = install({ withFetch: true, hooks: { console: false, fetch: false } });
+
+  env.win.console.error('boom');
+  assert.equal(env.real().filter((r) => r.kind === 'console').length, 0, 'console hook not installed');
+  assert.ok(env.chained.some((c) => c[0] === 'error' && c[1] === 'boom'), 'console.* left untouched');
+
+  return env.win.fetch('/x').then(() => {
+    assert.equal(env.real().filter((r) => r.kind === 'net').length, 0, 'fetch hook not installed');
+    env.win.dispatch('error', { message: 'kaboom', filename: 'a.js', lineno: 1, colno: 1, error: { stack: '' } });
+    assert.ok(env.real().some((r) => r.kind === 'error' && r.data.message === 'kaboom'), 'errors hook still active');
+  });
 });
 
 test('uncaught errors and unhandled rejections are captured', () => {

@@ -143,10 +143,31 @@ TEST_CASE ("WebAgentBridge publishes {port,token} to the discovery file, and rem
     const auto v = juce::JSON::parse (disc.loadFileAsString());
     REQUIRE ((int) v.getProperty ("port", 0) == port);
     REQUIRE (v.getProperty ("token", juce::var()).toString().isNotEmpty());
+    // Instance identity: module-derived fields are always present; an unset label is omitted.
+    REQUIRE ((int) v.getProperty ("pid", 0) > 0);
+    REQUIRE (v.getProperty ("processName", juce::var()).toString().isNotEmpty());
+    REQUIRE (v.getProperty ("startedAt", juce::var()).toString().isNotEmpty());
+    REQUIRE_FALSE (v.hasProperty ("label"));
 
     bridge.stop();
     REQUIRE_FALSE (bridge.isRunning());
     REQUIRE_FALSE (disc.existsAsFile()); // stop() deletes the discovery file
+}
+
+TEST_CASE ("WebAgentBridge publishes an embedder-supplied instance label", "[web_agent][bridge]")
+{
+    auto disc = tempDisc ("wab_disc_label.json");
+    WebAgentBridge bridge;
+    bridge.setInstanceLabel ("Track 3 EQ");
+    const int port = bridge.start (19101, disc);
+    REQUIRE (port != 0);
+    REQUIRE (disc.existsAsFile());
+
+    const auto v = juce::JSON::parse (disc.loadFileAsString());
+    REQUIRE (v.getProperty ("label", juce::var()).toString() == "Track 3 EQ");
+    REQUIRE ((int) v.getProperty ("pid", 0) > 0);
+
+    bridge.stop();
 }
 
 TEST_CASE ("WebAgentBridge requires the session token before serving any op", "[web_agent][bridge]")
@@ -166,7 +187,9 @@ TEST_CASE ("WebAgentBridge requires the session token before serving any op", "[
     const auto r1 = recvReply (c, 2000);
     REQUIRE (r1.isObject());
     REQUIRE_FALSE ((bool) r1.getProperty ("ok", true));
-    REQUIRE (r1.getProperty ("error", juce::var()).toString() == "auth required");
+    const auto err1 = r1.getProperty ("error", juce::var());
+    REQUIRE (err1.getProperty ("code", juce::var()).toString() == "AUTH_REQUIRED");
+    REQUIRE (err1.getProperty ("message", juce::var()).toString() == "auth required");
 
     // Correct token -> served (and the connection is now authenticated).
     REQUIRE (sendLine (c, "{\"id\":2,\"op\":\"ping\",\"token\":\"" + token + "\"}"));
@@ -189,7 +212,9 @@ TEST_CASE ("WebAgentBridge rejects an unknown op", "[web_agent][bridge]")
     const auto r = recvReply (*c, 2000);
     REQUIRE_FALSE ((bool) r.getProperty ("ok", true));
     REQUIRE ((int) r.getProperty ("id", -1) == 9); // reply echoes the request id
-    REQUIRE (r.getProperty ("error", juce::var()).toString().contains ("unknown op"));
+    const auto unknownErr = r.getProperty ("error", juce::var());
+    REQUIRE (unknownErr.getProperty ("code", juce::var()).toString() == "UNKNOWN_OP");
+    REQUIRE (unknownErr.getProperty ("message", juce::var()).toString().contains ("unknown op"));
 
     bridge.stop();
 }
@@ -225,7 +250,9 @@ TEST_CASE ("WebAgentBridge eval returns the evaluator result and surfaces its er
     const auto bad = recvReply (*c, 3000);
     REQUIRE_FALSE ((bool) bad.getProperty ("ok", true));
     REQUIRE ((int) bad.getProperty ("id", -1) == 11);
-    REQUIRE (bad.getProperty ("error", juce::var()).toString() == "kaboom");
+    const auto badErr = bad.getProperty ("error", juce::var());
+    REQUIRE (badErr.getProperty ("code", juce::var()).toString() == "EVAL_ERROR");
+    REQUIRE (badErr.getProperty ("message", juce::var()).toString() == "kaboom");
 
     bridge.stop();
 }
@@ -294,7 +321,9 @@ TEST_CASE ("WebAgentBridge shot returns the path, surfaces errors, and threads t
     REQUIRE (sendLine (*c, R"({"id":31,"op":"shot","path":"/tmp/fail.png"})"));
     const auto bad = recvReply (*c, 3000);
     REQUIRE_FALSE ((bool) bad.getProperty ("ok", true));
-    REQUIRE (bad.getProperty ("error", juce::var()).toString() == "capture failed");
+    const auto badErr = bad.getProperty ("error", juce::var());
+    REQUIRE (badErr.getProperty ("code", juce::var()).toString() == "SCREENSHOT_FAILED");
+    REQUIRE (badErr.getProperty ("message", juce::var()).toString() == "capture failed");
 
     bridge.stop();
 }
@@ -312,7 +341,9 @@ TEST_CASE ("WebAgentBridge eval without a registered evaluator reports 'no webvi
     REQUIRE (sendLine (*c, R"({"id":40,"op":"eval","code":"1"})"));
     const auto r = recvReply (*c, 3000);
     REQUIRE_FALSE ((bool) r.getProperty ("ok", true));
-    REQUIRE (r.getProperty ("error", juce::var()).toString() == "no webview");
+    const auto noEvalErr = r.getProperty ("error", juce::var());
+    REQUIRE (noEvalErr.getProperty ("code", juce::var()).toString() == "NO_WEBVIEW");
+    REQUIRE (noEvalErr.getProperty ("message", juce::var()).toString() == "no webview");
 
     bridge.stop();
 }
@@ -388,7 +419,7 @@ TEST_CASE ("WebAgentBridge hello reports protocol version + capabilities", "[web
 
     REQUIRE ((bool) r.getProperty ("ok", false));
     REQUIRE ((int) r.getProperty ("id", -1) == 50);
-    REQUIRE ((int) r.getProperty ("protocolVersion", 0) == 1);
+    REQUIRE ((int) r.getProperty ("protocolVersion", 0) == 2);
     REQUIRE ((bool) r.getProperty ("authRequired", false)); // token gate is active
 
     // The module build, so a client can name it when a capability is missing:
@@ -603,18 +634,103 @@ TEST_CASE ("WebAgentBridge survives writing to a client that vanished mid-stream
     bridge.stop();
 }
 
-TEST_CASE ("WebAgentBridge fails open (no auth) when it cannot publish the discovery file",
+TEST_CASE ("WebAgentBridge caps the number of simultaneous connections", "[web_agent][bridge]")
+{
+    auto disc = tempDisc ("wab_disc_cap.json");
+    WebAgentBridge bridge;
+    bridge.setMaxConnections (2);
+    const int port = bridge.start (19081, disc);
+    REQUIRE (port != 0);
+    const auto token = tokenOf (disc);
+
+    // Two authenticated clients fill the cap (authedClient round-trips, so both are
+    // registered before the third connects).
+    auto c1 = authedClient (port, token);
+    auto c2 = authedClient (port, token);
+
+    // The third is accepted at the TCP layer but immediately closed by the cap.
+    juce::StreamingSocket c3;
+    REQUIRE (c3.connect ("127.0.0.1", port, 1000));
+    REQUIRE (c3.waitUntilReady (true, 1000) == 1); // peer close makes it read-ready
+    char buf[16];
+    REQUIRE (c3.read (buf, sizeof (buf), false) <= 0); // EOF: closed by the cap
+
+    // The two accepted clients keep working.
+    REQUIRE (sendLine (*c1, R"({"id":1,"op":"ping"})"));
+    REQUIRE ((bool) recvReply (*c1, 2000).getProperty ("ok", false));
+
+    bridge.stop();
+}
+
+TEST_CASE ("WebAgentBridge honours a configured sink history limit", "[web_agent][bridge]")
+{
+    auto disc = tempDisc ("wab_disc_hist.json");
+    WebAgentBridge bridge;
+    bridge.setSinkLimits (4096, 2); // keep only the 2 most recent frames for replay
+    const int port = bridge.start (19091, disc);
+    REQUIRE (port != 0);
+
+    for (int i = 0; i < 5; ++i)
+    {
+        juce::DynamicObject::Ptr e (new juce::DynamicObject());
+        e->setProperty ("kind", "console");
+        e->setProperty ("n", i);
+        bridge.pushSink (juce::var (e.get()));
+    }
+
+    auto c = authedClient (port, tokenOf (disc));
+    REQUIRE (sendLine (*c, R"({"id":60,"op":"sink_replay","since":0})"));
+    const auto lines = recvLines (*c, 3, 2000); // 2 sink frames (seq 4,5) + the ack
+    int count = -1;
+    std::vector<int> seqs;
+    for (const auto& v : lines)
+    {
+        const auto op2 = v.getProperty ("op", juce::var()).toString();
+        if (op2 == "sink")             seqs.push_back ((int) v.getProperty ("seq", -1));
+        else if (op2 == "sink_replay") count = (int) v.getProperty ("count", -1);
+    }
+    REQUIRE (count == 2); // only the 2 most recent survived the history cap
+    REQUIRE (seqs.size() == 2);
+    REQUIRE (seqs[0] == 4);
+    REQUIRE (seqs[1] == 5);
+
+    bridge.stop();
+}
+
+TEST_CASE ("WebAgentBridge fails CLOSED (refuses to start) when it cannot publish the token",
            "[web_agent][bridge]")
 {
-    // A child of a regular file is unwritable, so replaceWithText() fails and the
-    // bridge clears the token rather than locking itself out.
+    // A child of a regular file is unwritable, so replaceWithText() fails. A tool
+    // that runs arbitrary JS must not silently drop auth — the bridge refuses to
+    // start rather than accept unauthenticated clients.
     auto parentFile = tempDisc ("wab_parent_is_file");
     REQUIRE (parentFile.replaceWithText ("x"));
     auto unwritable = parentFile.getChildFile ("disc.json");
 
     WebAgentBridge bridge;
-    const int port = bridge.start (18991, unwritable);
+    const int port = bridge.start (18991, unwritable); // default: fail closed
+    REQUIRE (port == 0);
+    REQUIRE_FALSE (bridge.isRunning());
+    REQUIRE_FALSE (unwritable.existsAsFile());
+
+    // Nothing is listening: a connection attempt to the (never-bound) port fails.
+    juce::StreamingSocket c;
+    REQUIRE_FALSE (c.connect ("127.0.0.1", 18991, 300));
+
+    parentFile.deleteFile();
+}
+
+TEST_CASE ("WebAgentBridge fails open only when allowUnauthenticatedLoopback is opted into",
+           "[web_agent][bridge]")
+{
+    auto parentFile = tempDisc ("wab_parent_is_file_open");
+    REQUIRE (parentFile.replaceWithText ("x"));
+    auto unwritable = parentFile.getChildFile ("disc.json");
+
+    WebAgentBridge bridge;
+    const int port = bridge.start (18991, unwritable, /*allowUnauthenticatedLoopback=*/true);
     REQUIRE (port != 0);
+    REQUIRE (bridge.isRunning());
     REQUIRE_FALSE (unwritable.existsAsFile());
 
     juce::StreamingSocket c;

@@ -27,6 +27,7 @@
  #include <cerrno>
  #include <sys/socket.h> // ::send()/MSG_NOSIGNAL/SO_NOSIGPIPE — keep SIGPIPE from killing the host
  #include <sys/stat.h>   // chmod() — 0600 on the plaintext-token discovery file
+ #include <unistd.h>     // getpid() — process id in the discovery record
 #endif
 
 namespace web_agent
@@ -57,11 +58,24 @@ juce::DynamicObject::Ptr makeReply (const juce::var& id, const juce::String& op,
     return r;
 }
 
-juce::var makeEvalReply (const juce::var& id, bool ok, const juce::var& result, const juce::String& error)
+// Structured op-reply error: { code, message }. `code` is a stable machine-readable
+// enum (see docs/protocol.md) so clients branch on the type, not the wording; `message`
+// stays human-readable. This is the op-reply error shape ONLY — sink `error` events
+// (streamed console/uncaught page errors) are a different thing and keep their shape.
+juce::var makeError (const juce::String& code, const juce::String& message)
+{
+    juce::DynamicObject::Ptr e (new juce::DynamicObject());
+    e->setProperty ("code", code);
+    e->setProperty ("message", message);
+    return juce::var (e.get());
+}
+
+juce::var makeEvalReply (const juce::var& id, bool ok, const juce::var& result,
+                         const juce::String& errorCode, const juce::String& errorMessage)
 {
     auto r = makeReply (id, "eval", ok);
-    if (ok)                 r->setProperty ("result", result);
-    if (error.isNotEmpty()) r->setProperty ("error", error);
+    if (ok)                                                r->setProperty ("result", result);
+    if (errorCode.isNotEmpty() || errorMessage.isNotEmpty()) r->setProperty ("error", makeError (errorCode, errorMessage));
     return juce::var (r.get());
 }
 
@@ -75,11 +89,12 @@ juce::var makeBoundsReply (const juce::var& id, juce::Rectangle<int> b)
     return juce::var (r.get());
 }
 
-juce::var makeShotReply (const juce::var& id, bool ok, const juce::String& path, const juce::String& error)
+juce::var makeShotReply (const juce::var& id, bool ok, const juce::String& path,
+                         const juce::String& errorCode, const juce::String& errorMessage)
 {
     auto r = makeReply (id, "shot", ok);
-    if (path.isNotEmpty())  r->setProperty ("path", path);
-    if (error.isNotEmpty()) r->setProperty ("error", error);
+    if (path.isNotEmpty())                                  r->setProperty ("path", path);
+    if (errorCode.isNotEmpty() || errorMessage.isNotEmpty()) r->setProperty ("error", makeError (errorCode, errorMessage));
     return juce::var (r.get());
 }
 
@@ -135,6 +150,17 @@ bool writeAll (juce::StreamingSocket& socket, const char* data, size_t len)
     return true;
    #endif
 }
+
+// Host process id, published in the discovery record so a client can tell several
+// instances of the same plugin apart (a bare "lowest port" says nothing about which).
+int currentProcessId()
+{
+   #if JUCE_WINDOWS
+    return (int) ::GetCurrentProcessId();
+   #else
+    return (int) ::getpid();
+   #endif
+}
 } // namespace
 
 //==============================================================================
@@ -187,6 +213,25 @@ struct WebAgentBridge::Impl : public std::enable_shared_from_this<WebAgentBridge
     juce::String token;          // session auth token ("" = auth disabled)
     juce::File   discoveryFile;  // {port,token} written here for client auto-discovery (legacy single file)
     juce::File   instanceFile;   // per-port file in <dir>/.web_agent_bridge.d so several hosts don't collide
+    juce::String startedAt;      // ISO-8601, captured at start(); part of the discovery record
+    juce::String instanceLabel;  // optional embedder-supplied label to disambiguate instances
+
+    // The {port,token,...} record published for discovery. Beyond the port/token a
+    // client needs to connect, it carries identity so a user (or a client's instance
+    // list) can tell several copies of the same plugin apart. `pid`/`processName`/
+    // `startedAt` are module-derived; `label` is whatever the embedder set.
+    juce::DynamicObject::Ptr makeDiscoveryRecord() const
+    {
+        juce::DynamicObject::Ptr d (new juce::DynamicObject());
+        d->setProperty ("port", port);
+        d->setProperty ("token", token);
+        d->setProperty ("pid", currentProcessId());
+        d->setProperty ("processName",
+                        juce::File::getSpecialLocation (juce::File::hostApplicationPath).getFileNameWithoutExtension());
+        d->setProperty ("startedAt", startedAt);
+        if (instanceLabel.isNotEmpty()) d->setProperty ("label", instanceLabel);
+        return d;
+    }
 
     // Sink writer: console/network events are enqueued (cheap) and broadcast on a
     // dedicated thread, so the message thread is never blocked by socket I/O.
@@ -202,6 +247,12 @@ struct WebAgentBridge::Impl : public std::enable_shared_from_this<WebAgentBridge
     std::atomic<std::uint64_t>                          sinkSeq { 0 };
     std::deque<std::pair<std::uint64_t, juce::String>>  sinkHistory;
     std::mutex                                          historyMutex;
+
+    // Tunable limits (public setters take effect immediately). maxConnections is a
+    // DoS guard on the accept loop (0 = unlimited); the sink caps bound memory.
+    std::atomic<int>    maxConnections { 16 };
+    std::atomic<size_t> sinkQueueMax   { kSinkQueueMax };
+    std::atomic<size_t> sinkHistoryMax { kSinkHistoryMax };
 
     //==========================================================================
     void broadcast (const juce::String& line)
@@ -220,7 +271,7 @@ struct WebAgentBridge::Impl : public std::enable_shared_from_this<WebAgentBridge
     {
         std::lock_guard<std::mutex> lk (historyMutex);
         sinkHistory.emplace_back (seq, line);
-        while (sinkHistory.size() > kSinkHistoryMax)
+        while (sinkHistory.size() > sinkHistoryMax.load())
             sinkHistory.pop_front();
     }
 
@@ -228,7 +279,7 @@ struct WebAgentBridge::Impl : public std::enable_shared_from_this<WebAgentBridge
     {
         {
             std::lock_guard<std::mutex> lk (sinkMutex);
-            if (sinkQueue.size() >= kSinkQueueMax)
+            if (sinkQueue.size() >= sinkQueueMax.load())
             {
                 sinkQueue.pop_front(); // bounded backpressure: drop oldest
                 if (++droppedSinks % 256 == 1)
@@ -318,7 +369,7 @@ struct WebAgentBridge::Impl : public std::enable_shared_from_this<WebAgentBridge
             if (msg.getProperty ("token", juce::var()).toString() != token)
             {
                 auto r = makeReply (id, op.isNotEmpty() ? op : juce::String ("auth"), false);
-                r->setProperty ("error", "auth required");
+                r->setProperty ("error", makeError ("AUTH_REQUIRED", "auth required"));
                 conn->write (makeLine (juce::var (r.get())));
                 return;
             }
@@ -336,7 +387,7 @@ struct WebAgentBridge::Impl : public std::enable_shared_from_this<WebAgentBridge
             }
         }
 
-        conn->write (makeLine (makeEvalReply (id, false, {}, "unknown op: " + op)));
+        conn->write (makeLine (makeEvalReply (id, false, {}, "UNKNOWN_OP", "unknown op: " + op)));
     }
 
     void handleHello (const std::shared_ptr<Connection>& conn, const juce::var& id, const juce::var&)
@@ -344,7 +395,7 @@ struct WebAgentBridge::Impl : public std::enable_shared_from_this<WebAgentBridge
         // Capabilities handshake: lets a client learn the protocol surface up
         // front (e.g. screenshotAvailable) instead of probing op-by-op.
         auto r = makeReply (id, "hello", true);
-        r->setProperty ("protocolVersion", 1);
+        r->setProperty ("protocolVersion", 2);
         // The module build the host embeds. protocolVersion only moves on a
         // BREAKING change, so it cannot tell a client whose plugin was built
         // against an older pin; this names that build outright. Additive field.
@@ -445,14 +496,14 @@ struct WebAgentBridge::Impl : public std::enable_shared_from_this<WebAgentBridge
             if (! fn)
             {
                 if (auto c = weakConn.lock())
-                    c->write (makeLine (makeEvalReply (id, false, {}, "no webview")));
+                    c->write (makeLine (makeEvalReply (id, false, {}, "NO_WEBVIEW", "no webview")));
                 return;
             }
 
             fn (code, [weakConn, id] (bool ok, juce::var result, juce::String error)
             {
                 if (auto c = weakConn.lock())
-                    c->write (makeLine (makeEvalReply (id, ok, result, error)));
+                    c->write (makeLine (makeEvalReply (id, ok, result, ok ? juce::String() : juce::String ("EVAL_ERROR"), error)));
             });
         });
     }
@@ -477,7 +528,7 @@ struct WebAgentBridge::Impl : public std::enable_shared_from_this<WebAgentBridge
             auto r = makeReply (id, "layerdebug", ok);
             r->setProperty ("enabled", enabled);
             if (! ok)
-                r->setProperty ("error", "no WKWebView found or SPI unavailable (non-mac backend?)");
+                r->setProperty ("error", makeError ("LAYER_UNAVAILABLE", "no WKWebView found or SPI unavailable (non-mac backend?)"));
 
             if (auto c = weakConn.lock())
                 c->write (makeLine (juce::var (r.get())));
@@ -505,7 +556,7 @@ struct WebAgentBridge::Impl : public std::enable_shared_from_this<WebAgentBridge
             if (ok)
                 r->setProperty ("text", juce::String (juce::CharPointer_UTF8 (text.c_str())));
             else
-                r->setProperty ("error", "no WKWebView found or SPI unavailable (non-mac backend?)");
+                r->setProperty ("error", makeError ("LAYER_UNAVAILABLE", "no WKWebView found or SPI unavailable (non-mac backend?)"));
 
             if (auto c = weakConn.lock())
                 c->write (makeLine (juce::var (r.get())));
@@ -539,7 +590,7 @@ struct WebAgentBridge::Impl : public std::enable_shared_from_this<WebAgentBridge
             if (! fn)
             {
                 if (auto c = weakConn.lock())
-                    c->write (makeLine (makeShotReply (id, false, {}, "screenshot unavailable")));
+                    c->write (makeLine (makeShotReply (id, false, {}, "SCREENSHOT_UNAVAILABLE", "screenshot unavailable")));
                 return;
             }
 
@@ -556,7 +607,7 @@ struct WebAgentBridge::Impl : public std::enable_shared_from_this<WebAgentBridge
             fn (target, crop, [weakConn, id] (bool ok, juce::String path, juce::String error)
             {
                 if (auto c = weakConn.lock())
-                    c->write (makeLine (makeShotReply (id, ok, path, error)));
+                    c->write (makeLine (makeShotReply (id, ok, path, ok ? juce::String() : juce::String ("SCREENSHOT_FAILED"), error)));
             });
         });
     }
@@ -610,6 +661,21 @@ struct WebAgentBridge::Impl : public std::enable_shared_from_this<WebAgentBridge
             }
             if (! running.load()) { delete raw; break; }
 
+            // Connection cap (DoS guard): one blocking read thread runs per client,
+            // so refuse new ones past the cap by accepting-then-closing. pruneDead()
+            // above keeps the count to live connections.
+            if (const int maxc = maxConnections.load(); maxc > 0)
+            {
+                size_t live;
+                { std::lock_guard<std::mutex> lk (connMutex); live = connections.size(); }
+                if ((int) live >= maxc)
+                {
+                    DBG ("[web_agent] connection cap reached (" << maxc << "); rejecting new client");
+                    delete raw; // closes the socket; the client sees a clean disconnect
+                    continue;
+                }
+            }
+
             configureAcceptedSocket (*raw); // SO_NOSIGPIPE (Apple/BSD): a mid-write disconnect must not kill the host
             auto conn = std::make_shared<Connection> (std::unique_ptr<juce::StreamingSocket> (raw));
             conn->authed.store (token.isEmpty()); // no token => open
@@ -643,7 +709,8 @@ const WebAgentBridge::Impl::OpEntry WebAgentBridge::Impl::kOpTable[9] = {
 WebAgentBridge::WebAgentBridge() : impl (std::make_shared<Impl>()) {}
 WebAgentBridge::~WebAgentBridge() { stop(); }
 
-int WebAgentBridge::start (int preferredPort, juce::File discoveryFileOverride)
+int WebAgentBridge::start (int preferredPort, juce::File discoveryFileOverride,
+                           bool allowUnauthenticatedLoopback)
 {
     if (impl->running.load()) return impl->port;
 
@@ -666,9 +733,10 @@ int WebAgentBridge::start (int preferredPort, juce::File discoveryFileOverride)
         return 0;
     }
 
-    impl->listener = std::move (listener);
-    impl->port     = port;
-    impl->token    = juce::Uuid().toString();
+    impl->listener  = std::move (listener);
+    impl->port      = port;
+    impl->token     = juce::Uuid().toString();
+    impl->startedAt = juce::Time::getCurrentTime().toISO8601 (true);
     impl->running.store (true);
 
     // Announce {port, token} so clients auto-discover without guessing the port.
@@ -680,9 +748,7 @@ int WebAgentBridge::start (int preferredPort, juce::File discoveryFileOverride)
                               : juce::File::getSpecialLocation (juce::File::userHomeDirectory)
                                     .getChildFile (".web_agent_bridge.json");
     {
-        juce::DynamicObject::Ptr d (new juce::DynamicObject());
-        d->setProperty ("port", port);
-        d->setProperty ("token", impl->token);
+        auto d = impl->makeDiscoveryRecord();
         const bool wrote = impl->discoveryFile.replaceWithText (juce::JSON::toString (juce::var (d.get())));
         DBG ("[web_agent] discovery " << (wrote ? "wrote " : "FAILED ") << impl->discoveryFile.getFullPathName());
         if (wrote)
@@ -693,9 +759,24 @@ int WebAgentBridge::start (int preferredPort, juce::File discoveryFileOverride)
             chmod (impl->discoveryFile.getFullPathName().toRawUTF8(), S_IRUSR | S_IWUSR); // 0600
            #endif
         }
+        else if (allowUnauthenticatedLoopback)
+        {
+            impl->token.clear(); // opt-in fail-open: run a tokenless loopback bridge
+        }
         else
         {
-            impl->token.clear(); // fail open: if we can't publish the token, don't require it
+            // Fail closed: a bridge that executes arbitrary JavaScript must not
+            // silently drop authentication just because the token file is
+            // unwritable. Refuse to start; the embedder opts into the open bridge
+            // explicitly via allowUnauthenticatedLoopback.
+            DBG ("[web_agent] refusing to start: cannot publish the session token to "
+                 << impl->discoveryFile.getFullPathName()
+                 << " (pass allowUnauthenticatedLoopback=true to run without a token)");
+            impl->listener.reset();
+            impl->token.clear();
+            impl->port = 0;
+            impl->running.store (false);
+            return 0;
         }
     }
 
@@ -708,9 +789,7 @@ int WebAgentBridge::start (int preferredPort, juce::File discoveryFileOverride)
         dir.createDirectory();
         impl->instanceFile = dir.getChildFile (juce::String (port) + ".json");
 
-        juce::DynamicObject::Ptr d (new juce::DynamicObject());
-        d->setProperty ("port", port);
-        d->setProperty ("token", impl->token);
+        auto d = impl->makeDiscoveryRecord();
         if (impl->instanceFile.replaceWithText (juce::JSON::toString (juce::var (d.get()))))
         {
            #if ! JUCE_WINDOWS
@@ -789,6 +868,22 @@ void WebAgentBridge::setScreenshotFunction (ScreenshotFn fn)
     impl->screenshotFn = std::move (fn);
 }
 
+void WebAgentBridge::setMaxConnections (int maxConnections)
+{
+    impl->maxConnections.store (juce::jmax (0, maxConnections));
+}
+
+void WebAgentBridge::setSinkLimits (int queueMax, int historyMax)
+{
+    impl->sinkQueueMax.store   ((size_t) juce::jmax (1, queueMax)); // a 0 queue would spin; floor at 1
+    impl->sinkHistoryMax.store ((size_t) juce::jmax (0, historyMax));
+}
+
+void WebAgentBridge::setInstanceLabel (const juce::String& label)
+{
+    impl->instanceLabel = label; // published by makeDiscoveryRecord() at start()
+}
+
 void WebAgentBridge::pushSink (const juce::var& event)
 {
     // Called on the message thread — assign a monotonic seq, keep a copy for replay,
@@ -805,10 +900,26 @@ void WebAgentBridge::pushSink (const juce::var& event)
 
 //==============================================================================
 juce::WebBrowserComponent::Options
-withCapture (juce::WebBrowserComponent::Options options, std::weak_ptr<WebAgentBridge> bridge)
+withCapture (juce::WebBrowserComponent::Options options, std::weak_ptr<WebAgentBridge> bridge,
+             CaptureOptions captureOptions)
 {
+    // Publish the enabled-hook set so the page script installs only what's asked
+    // (each key defaults on in the script, so this only ever turns things off).
+    juce::DynamicObject::Ptr hooks (new juce::DynamicObject());
+    hooks->setProperty ("console", captureOptions.console);
+    hooks->setProperty ("errors",  captureOptions.errors);
+    hooks->setProperty ("timing",  captureOptions.timing);
+    hooks->setProperty ("fetch",   captureOptions.fetch);
+    hooks->setProperty ("xhr",     captureOptions.xhr);
+    hooks->setProperty ("ws",      captureOptions.webSocket);
+    hooks->setProperty ("sse",        captureOptions.eventSource);
+    hooks->setProperty ("beacon",     captureOptions.beacon);
+    hooks->setProperty ("navigation", captureOptions.navigation);
+    const auto prelude = "window.__webAgentCaptureHooks = "
+                       + juce::JSON::toString (juce::var (hooks.get()), true) + ";\n";
+
     return options
-        .withUserScript (kCaptureScript)
+        .withUserScript (prelude + juce::String (kCaptureScript))
         .withNativeFunction ("__webAgentSink",
             [bridge] (const juce::Array<juce::var>& args,
                       juce::WebBrowserComponent::NativeFunctionCompletion completion)
