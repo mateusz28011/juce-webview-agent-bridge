@@ -657,7 +657,8 @@ const WebAgentBridge::Impl::OpEntry WebAgentBridge::Impl::kOpTable[9] = {
 WebAgentBridge::WebAgentBridge() : impl (std::make_shared<Impl>()) {}
 WebAgentBridge::~WebAgentBridge() { stop(); }
 
-int WebAgentBridge::start (int preferredPort, juce::File discoveryFileOverride)
+int WebAgentBridge::start (int preferredPort, juce::File discoveryFileOverride,
+                           bool allowUnauthenticatedLoopback)
 {
     if (impl->running.load()) return impl->port;
 
@@ -707,9 +708,24 @@ int WebAgentBridge::start (int preferredPort, juce::File discoveryFileOverride)
             chmod (impl->discoveryFile.getFullPathName().toRawUTF8(), S_IRUSR | S_IWUSR); // 0600
            #endif
         }
+        else if (allowUnauthenticatedLoopback)
+        {
+            impl->token.clear(); // opt-in fail-open: run a tokenless loopback bridge
+        }
         else
         {
-            impl->token.clear(); // fail open: if we can't publish the token, don't require it
+            // Fail closed: a bridge that executes arbitrary JavaScript must not
+            // silently drop authentication just because the token file is
+            // unwritable. Refuse to start; the embedder opts into the open bridge
+            // explicitly via allowUnauthenticatedLoopback.
+            DBG ("[web_agent] refusing to start: cannot publish the session token to "
+                 << impl->discoveryFile.getFullPathName()
+                 << " (pass allowUnauthenticatedLoopback=true to run without a token)");
+            impl->listener.reset();
+            impl->token.clear();
+            impl->port = 0;
+            impl->running.store (false);
+            return 0;
         }
     }
 

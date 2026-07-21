@@ -74,8 +74,17 @@ public:
                for client auto-discovery. Empty (the default) uses
                ~/.web_agent_bridge.json. Override it to isolate a test run, or to
                give each instance its own file when several embed the bridge at
-               once (the default shared path would otherwise collide). */
-    int  start (int preferredPort = 8930, juce::File discoveryFileOverride = {});
+               once (the default shared path would otherwise collide).
+        @param allowUnauthenticatedLoopback  what to do when the session token
+               cannot be published (its discovery file is unwritable). The bridge
+               executes arbitrary JavaScript, so it fails CLOSED by default: it
+               refuses to start and returns 0 rather than silently accepting
+               unauthenticated clients. Pass true only to deliberately opt into an
+               open, tokenless loopback bridge (e.g. a dev box whose home dir is
+               not writable) — then a publish failure keeps the old fail-open
+               behaviour (token disabled, every loopback client authorised). */
+    int  start (int preferredPort = 8930, juce::File discoveryFileOverride = {},
+                bool allowUnauthenticatedLoopback = false);
     void stop();
 
     bool isRunning() const noexcept;

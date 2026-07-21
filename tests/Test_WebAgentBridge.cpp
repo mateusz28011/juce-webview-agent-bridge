@@ -613,18 +613,40 @@ TEST_CASE ("WebAgentBridge survives writing to a client that vanished mid-stream
     bridge.stop();
 }
 
-TEST_CASE ("WebAgentBridge fails open (no auth) when it cannot publish the discovery file",
+TEST_CASE ("WebAgentBridge fails CLOSED (refuses to start) when it cannot publish the token",
            "[web_agent][bridge]")
 {
-    // A child of a regular file is unwritable, so replaceWithText() fails and the
-    // bridge clears the token rather than locking itself out.
+    // A child of a regular file is unwritable, so replaceWithText() fails. A tool
+    // that runs arbitrary JS must not silently drop auth — the bridge refuses to
+    // start rather than accept unauthenticated clients.
     auto parentFile = tempDisc ("wab_parent_is_file");
     REQUIRE (parentFile.replaceWithText ("x"));
     auto unwritable = parentFile.getChildFile ("disc.json");
 
     WebAgentBridge bridge;
-    const int port = bridge.start (18991, unwritable);
+    const int port = bridge.start (18991, unwritable); // default: fail closed
+    REQUIRE (port == 0);
+    REQUIRE_FALSE (bridge.isRunning());
+    REQUIRE_FALSE (unwritable.existsAsFile());
+
+    // Nothing is listening: a connection attempt to the (never-bound) port fails.
+    juce::StreamingSocket c;
+    REQUIRE_FALSE (c.connect ("127.0.0.1", 18991, 300));
+
+    parentFile.deleteFile();
+}
+
+TEST_CASE ("WebAgentBridge fails open only when allowUnauthenticatedLoopback is opted into",
+           "[web_agent][bridge]")
+{
+    auto parentFile = tempDisc ("wab_parent_is_file_open");
+    REQUIRE (parentFile.replaceWithText ("x"));
+    auto unwritable = parentFile.getChildFile ("disc.json");
+
+    WebAgentBridge bridge;
+    const int port = bridge.start (18991, unwritable, /*allowUnauthenticatedLoopback=*/true);
     REQUIRE (port != 0);
+    REQUIRE (bridge.isRunning());
     REQUIRE_FALSE (unwritable.existsAsFile());
 
     juce::StreamingSocket c;

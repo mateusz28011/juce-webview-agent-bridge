@@ -19,6 +19,15 @@ commit comparisons are available from the linked GitHub Releases.
   commit list, so the changelog is the single source of truth for release notes
   and there is no hand-written release body to drift or forget.
 
+### Security
+
+- The bridge now fails **closed** when it cannot publish the session token (its
+  discovery file is unwritable): `start()` refuses to run and returns 0 instead
+  of silently disabling authentication and accepting any loopback client — the
+  old fail-open default was unsafe for a tool that executes arbitrary JavaScript.
+  An embedder can opt back into an open, tokenless bridge with the new
+  `start(..., allowUnauthenticatedLoopback: true)` argument.
+
 ## [0.5.2] - 2026-07-21
 
 ### Fixed

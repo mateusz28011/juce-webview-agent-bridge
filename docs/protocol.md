@@ -16,8 +16,11 @@ single legacy file. The client enumerates that directory and picks the requested
 host. The client reads it automatically — no need to know the port. A random
 **session token** is required: a connection must present it (in any message, e.g.
 `{"op":"auth","token":"…"}`) before any op runs or before it receives the sink
-stream. The bundled client handles this transparently. (If the host can't write the
-discovery file, it fails open and disables the token.)
+stream. The bundled client handles this transparently. (If the host can't publish the
+token — its discovery file is unwritable — it fails **closed** by default: `start()`
+refuses to run and returns 0, rather than accepting unauthenticated clients. An
+embedder can opt into an open, tokenless loopback bridge with
+`start(..., allowUnauthenticatedLoopback: true)`.)
 
 ## Ops
 
