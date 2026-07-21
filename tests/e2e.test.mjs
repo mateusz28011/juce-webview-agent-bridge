@@ -26,7 +26,7 @@ afterEach(() => { for (const p of openPages.splice(0)) { try { p.close(); } catc
 // test script the result per eval via onEval(code, state). It also tracks every
 // connected socket so a test can push unsolicited `sink` frames (the live
 // console/network/error stream) via the returned pushSink() helper.
-function startMock({ onEval, onShot, onLayerTree, hello = {}, dropOnHello = false } = {}) {
+function startMock({ onEval, onShot, onShotStream, onLayerTree, hello = {}, dropOnHello = false } = {}) {
   const state = { evals: [], token: null, sockets: [], helloCount: 0 };
   const server = net.createServer((sock) => {
     sock.on('error', () => {});
@@ -51,7 +51,7 @@ function startMock({ onEval, onShot, onLayerTree, hello = {}, dropOnHello = fals
           if (dropOnHello) { sock.destroy(); return; } // transport failure, not a legacy host
           reply({ op: 'hello', ok: true, protocolVersion: 2, platform: 'mac',
                   moduleVersion: '0.4.0',
-                  ops: ['hello', 'ping', 'auth', 'eval', 'bounds', 'shot', 'layerdebug', 'layertree', 'sink_replay'],
+                  ops: ['hello', 'ping', 'auth', 'eval', 'bounds', 'shot', 'shot_stream', 'layerdebug', 'layertree', 'sink_replay'],
                   screenshotAvailable: true, authRequired: true, ...hello });
           continue;
         }
@@ -72,6 +72,14 @@ function startMock({ onEval, onShot, onLayerTree, hello = {}, dropOnHello = fals
         if (m.op === 'shot') {
           const r = onShot ? onShot(m) : { ok: true, path: m.path || '/tmp/web-agent-shot.png' };
           reply({ op: 'shot', ...r });
+          continue;
+        }
+        if (m.op === 'shot_stream') {
+          const n = onShotStream ? onShotStream(m, state) : 3;
+          for (let i = 0; i < n; i++)
+            sock.write(JSON.stringify({ op: 'sink', seq: 1000 + i,
+              event: { kind: 'frame', t: i * 0.03, data: { path: `/tmp/frames/frame-${i}.png`, w: 120, h: 80 } } }) + '\n');
+          reply({ op: 'shot_stream', ok: true, count: n, dir: '/tmp/frames' });
           continue;
         }
         if (m.op === 'layerdebug') {
@@ -576,6 +584,34 @@ test('waitForEvent matches an error event by predicate', async () => {
     pushSink({ kind: 'error', t: 2, data: { message: 'kaboom!' } });
     const ev = await pending;
     assert.match(ev.data.message, /kaboom/);
+    page.close();
+  } finally { server.close(); }
+});
+
+test('captureStream streams frame events and returns the dir + count', async () => {
+  const { server, port } = await startMock({ onEval: () => 'ok', onShotStream: () => 4 });
+  try {
+    const page = await openPage(port);
+    const live = [];
+    page.on('frame', (ev) => live.push(ev.data.path));
+    const r = await page.captureStream({ fps: 24, durationMs: 100 });
+    assert.equal(r.count, 4);
+    assert.equal(r.frames.length, 4);
+    assert.equal(r.dir, '/tmp/frames');
+    assert.equal(live.length, 4, 'frame events delivered live to page.on(frame)');
+    assert.match(r.frames[0].path, /frame-0\.png$/);
+    page.close();
+  } finally { server.close(); }
+});
+
+test('captureStream fails clearly when the host lacks shot_stream', async () => {
+  const { server, port } = await startMock({
+    onEval: () => 'ok',
+    hello: { ops: ['hello', 'ping', 'auth', 'eval', 'bounds', 'shot', 'layerdebug', 'layertree', 'sink_replay'] },
+  });
+  try {
+    const page = await openPage(port);
+    await assert.rejects(() => page.captureStream(), /needs the "shot_stream" op/);
     page.close();
   } finally { server.close(); }
 });

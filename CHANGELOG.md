@@ -7,6 +7,13 @@ commit comparisons are available from the linked GitHub Releases.
 
 ### Added
 
+- New `shot_stream` op captures the host window at frame rate to a directory of
+  PNGs via a persistent ScreenCaptureKit stream (macOS 14+), for measuring pixel
+  motion / animation smoothness where the one-shot `shot` (~9 fps) is too slow. Each
+  frame is announced as a `frame` sink event and the reply carries the count;
+  `page.captureStream({fps, durationMs, clip})` drives it. Windows/Linux report it
+  as unavailable for now (a follow-up).
+
 - The sink stream now emits a `navigation` event (`data: {url, title}`) on every
   page (re)load, so a client can detect that a reload wiped its injected state
   (recorders, hooks, page globals) instead of the reload passing silently — the

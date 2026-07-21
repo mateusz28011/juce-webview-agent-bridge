@@ -13,7 +13,7 @@
    minimumCppStandard: 17
 
    dependencies:       juce_gui_extra
-   OSXFrameworks:      ImageIO CoreGraphics
+   OSXFrameworks:      ImageIO CoreGraphics CoreMedia CoreImage CoreVideo
    WeakOSXFrameworks:  ScreenCaptureKit
 
   END_JUCE_MODULE_DECLARATION
