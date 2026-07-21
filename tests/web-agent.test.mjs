@@ -42,12 +42,12 @@ function startMockBridge({ onEval, requireToken = 'T', splitUtf8 = false, afterA
           if (m.token === requireToken) authed = true;
         }
         const reply = (obj) => sock.write(JSON.stringify({ id: m.id, ...obj }) + '\n');
-        if (requireToken && !authed) { reply({ op: m.op || 'auth', ok: false, error: 'auth required' }); continue; }
+        if (requireToken && !authed) { reply({ op: m.op || 'auth', ok: false, error: { code: 'AUTH_REQUIRED', message: 'auth required' } }); continue; }
         if (m.op === 'auth') { reply({ op: 'auth', ok: true }); if (afterAuth) afterAuth(sock); continue; }
         if (m.op === 'ping') { reply({ op: 'ping', ok: true }); continue; }
         if (m.op === 'hello') {
           // `hello` overrides let a test stand in for an older or newer host.
-          reply({ op: 'hello', ok: true, protocolVersion: 1, platform: 'mac', moduleVersion: '0.4.0',
+          reply({ op: 'hello', ok: true, protocolVersion: 2, platform: 'mac', moduleVersion: '0.4.0',
                   ops: ['ping', 'eval', 'shot'], screenshotAvailable: false, authRequired: true, ...hello });
           continue;
         }
@@ -73,7 +73,7 @@ function startMockBridge({ onEval, requireToken = 'T', splitUtf8 = false, afterA
           reply({ op: 'shot', ok: true, path: m.path || '/tmp/wab-shot.png' });
           continue;
         }
-        reply({ op: m.op, ok: false, error: 'unknown op: ' + m.op });
+        reply({ op: m.op, ok: false, error: { code: 'UNKNOWN_OP', message: 'unknown op: ' + m.op } });
       }
     });
   });
@@ -204,7 +204,7 @@ test('hello: prints the capabilities handshake', async () => {
     const home = tempHomeWith({ port, token: 'T' });
     const { code, out } = await runClient(['hello'], { home });
     assert.equal(code, 0);
-    assert.match(out, /"protocolVersion": 1/);
+    assert.match(out, /"protocolVersion": 2/);
     assert.match(out, /"platform": "mac"/);
     assert.match(out, /"screenshotAvailable": false/);
   } finally {

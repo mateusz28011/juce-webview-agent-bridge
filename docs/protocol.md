@@ -36,6 +36,29 @@ also carries `token` until the connection is authenticated.
 | `{"id","op":"layertree"}` | `{"id","op":"layertree","ok","text"?,"error"?}` — dumps the first WKWebView's UI-process (remote) CALayer tree as text via the `_caLayerTreeAsText` SPI: a programmatic compositing-layer census (count + geometry) with no screenshot needed; macOS only. |
 | `{"id","op":"sink_replay","since"?}` | re-sends buffered `sink` frames with `seq` > `since`, then `{"id","op":"sink_replay","ok",count}` |
 
+Each `"error"?` above is the object defined in **Errors** below — since protocol 2 it is
+no longer a bare string.
+
+## Errors
+
+A failed op reply (`"ok":false`) carries a structured `error` object, so clients branch
+on a stable code instead of matching message text:
+
+```json
+{ "id": 7, "op": "eval", "ok": false,
+  "error": { "code": "EVAL_ERROR", "message": "ReferenceError: x is not defined", "details"?: {} } }
+```
+
+`code` is a stable machine-readable enum; `message` is human-readable; `details` is
+optional. Current codes: `AUTH_REQUIRED`, `UNKNOWN_OP`, `NO_WEBVIEW`, `EVAL_ERROR`,
+`SCREENSHOT_UNAVAILABLE`, `SCREENSHOT_FAILED`, `LAYER_UNAVAILABLE`. The set grows
+additively; treat an unknown code as a generic failure. This is the **op-reply** error
+shape only — the sink `error` event kind (streamed page console/uncaught errors) is
+unrelated and keeps its own `data` shape.
+
+> **protocolVersion 2** introduced this object shape. In protocol 1, `error` was a
+> plain string; that was a breaking wire change, hence the major bump.
+
 ## Version negotiation
 
 The client and the host module version independently — a plugin pins a module

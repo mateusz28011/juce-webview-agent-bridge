@@ -25,7 +25,7 @@
  */
 import net from 'node:net';
 import path from 'node:path';
-import { DEFAULT_PORT, assertProtocolSupported, loadDiscovery, onJsonLines, parseHello, requireOp } from './shared.mjs';
+import { BridgeOpError, DEFAULT_PORT, assertProtocolSupported, loadDiscovery, onJsonLines, parseHello, requireOp } from './shared.mjs';
 const argv = process.argv.slice(2);
 const opt = (name, def) => {
     const i = argv.indexOf(name);
@@ -75,7 +75,7 @@ function request(obj, { timeoutMs = 15000 } = {}) {
 async function evalJs(code, timeoutMs = 15000) {
     const r = await request({ op: 'eval', code }, { timeoutMs });
     if (!r.ok)
-        throw new Error(r.error || 'eval failed');
+        throw new BridgeOpError(r.error, 'eval failed');
     return r.result;
 }
 function fmt(v) {
@@ -141,13 +141,13 @@ async function main() {
             const r = await request({ op: 'layerdebug', enabled });
             console.log(r.ok
                 ? `compositing overlays ${enabled ? 'ON' : 'OFF'} (layer borders + repaint counters)`
-                : `failed: ${r.error || 'unavailable'}`);
+                : `failed: ${r.error?.message || 'unavailable'}`);
             break;
         }
         case 'layertree': {
             requireHostOp('layertree', 'the `layertree` command');
             const r = await request({ op: 'layertree' });
-            console.log(r.ok ? r.text : `failed: ${r.error || 'unavailable'}`);
+            console.log(r.ok ? r.text : `failed: ${r.error?.message || 'unavailable'}`);
             break;
         }
         case 'hello': {
@@ -220,7 +220,7 @@ async function main() {
             }
             const r = await request({ op: 'shot', ...(out ? { path: out } : {}), ...(rect ? { rect } : {}) }, { timeoutMs: 30000 });
             if (!r.ok)
-                throw new Error(r.error || 'native screenshot failed');
+                throw new BridgeOpError(r.error, 'native screenshot failed');
             console.log(r.path);
             break;
         }

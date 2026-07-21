@@ -7,6 +7,13 @@ commit comparisons are available from the linked GitHub Releases.
 
 ### Changed
 
+- **Breaking (protocol 2):** op-reply errors are now a structured object,
+  `error: { code, message, details? }`, instead of a plain `error` string. `code`
+  is a stable machine-readable enum (`AUTH_REQUIRED`, `UNKNOWN_OP`, `NO_WEBVIEW`,
+  `EVAL_ERROR`, `SCREENSHOT_UNAVAILABLE`, `SCREENSHOT_FAILED`, `LAYER_UNAVAILABLE`)
+  so clients branch on the error type instead of matching message text. The bridge
+  advertises `protocolVersion: 2`; the npm clients now throw an exported
+  `BridgeOpError` carrying `.code`. Sink `error` events are unaffected.
 - GitHub Release notes are now filled automatically from the released
   `CHANGELOG.md` section (plus the comparison link) instead of GitHub's raw
   commit list, so the changelog is the single source of truth for release notes

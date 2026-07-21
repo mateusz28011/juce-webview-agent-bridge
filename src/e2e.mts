@@ -34,8 +34,10 @@ import os from 'node:os';
 import path from 'node:path';
 import type { Socket } from 'node:net';
 
-import { DEFAULT_PORT, assertProtocolSupported, loadDiscovery, onJsonLines, parseHello, requireOp } from './shared.mjs';
+import { BridgeOpError, DEFAULT_PORT, assertProtocolSupported, loadDiscovery, onJsonLines, parseHello, requireOp } from './shared.mjs';
 import type { BridgeCapabilities } from './shared.mjs';
+export { BridgeOpError } from './shared.mjs';
+export type { BridgeError, BridgeErrorCode } from './shared.mjs';
 
 type ProtocolMessage = Record<string, any>;
 type LogFn = (message: string) => void;
@@ -492,7 +494,7 @@ class Session {
   }
   async evalRaw<T = unknown>(code: string, opts?: RequestOptions): Promise<T> {
     const r = await this.request({ op: 'eval', code }, opts);
-    if (!r.ok) throw new Error(r.error || 'eval failed');
+    if (!r.ok) throw new BridgeOpError(r.error, 'eval failed');
     return r.result;
   }
   close() { try { this.sock.destroy(); } catch {} }
@@ -548,7 +550,12 @@ export async function connect({ host = '127.0.0.1', port, token, timeout = 5000,
     const injected = await session.request({ op: 'eval', code: PAGE_HELPERS }); // inject helpers once
     // An unchecked injection hands back a Page whose every locator then fails
     // cryptically; a failed auth also surfaces here rather than silently.
-    if (!injected.ok) throw new Error(`bridge rejected the page helpers: ${injected.error || 'unknown error'}`);
+    if (!injected.ok) {
+      const he = injected.error;
+      throw new BridgeOpError(
+        { code: he?.code, message: `bridge rejected the page helpers: ${he?.message ?? 'unknown error'}` },
+        'bridge rejected the page helpers');
+    }
   } catch (e) { session.close(); throw e; }
   const page = new Page(session, { defaultTimeout: timeout, interval, log: logger, backendTimeoutMs, caps });
   page.logFile = file; // where actions are being written (null if a custom log fn was passed)
@@ -673,7 +680,7 @@ export class Page {
   async replayEvents({ since = 0 }: { since?: number } = {}): Promise<number> {
     requireOp(this.caps, 'sink_replay', 'page.replayEvents()');
     const r = await this.session.request({ op: 'sink_replay', since });
-    if (!r.ok) throw new Error(r.error || 'sink_replay failed');
+    if (!r.ok) throw new BridgeOpError(r.error, 'sink_replay failed');
     return r.count;
   }
 
@@ -781,7 +788,7 @@ export class Page {
     requireOp(this.caps, 'layerdebug', 'page.layerDebug()');
     this.log(`layerdebug ${enabled ? 'on' : 'off'}`);
     const r = await this.session.request({ op: 'layerdebug', enabled }, { timeoutMs: 10000 });
-    if (!r.ok) throw new Error(r.error || 'layerdebug unavailable');
+    if (!r.ok) throw new BridgeOpError(r.error, 'layerdebug unavailable');
     return true;
   }
 
@@ -793,7 +800,7 @@ export class Page {
     requireOp(this.caps, 'layertree', 'page.layerTree()');
     this.log('layertree');
     const r = await this.session.request({ op: 'layertree' }, { timeoutMs: 10000 });
-    if (!r.ok) throw new Error(r.error || 'layertree unavailable');
+    if (!r.ok) throw new BridgeOpError(r.error, 'layertree unavailable');
     return r.text;
   }
 
@@ -805,7 +812,7 @@ export class Page {
     this.log(`screenshot${clip ? ' (region)' : ''}${path ? ' ' + path : ''}`);
     const r = await this.session.request(
       { op: 'shot', ...(path ? { path } : {}), ...(clip ? { rect: clip } : {}) }, { timeoutMs: 30000 });
-    if (!r.ok) throw new Error(r.error || 'native screenshot failed');
+    if (!r.ok) throw new BridgeOpError(r.error, 'native screenshot failed');
     return r.path;
   }
 

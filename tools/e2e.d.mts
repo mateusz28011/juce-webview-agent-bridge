@@ -1,5 +1,7 @@
 import type { Socket } from 'node:net';
 import type { BridgeCapabilities } from './shared.mjs';
+export { BridgeOpError } from './shared.mjs';
+export type { BridgeError, BridgeErrorCode } from './shared.mjs';
 type ProtocolMessage = Record<string, any>;
 type LogFn = (message: string) => void;
 type TimeoutOptions = {

@@ -166,7 +166,9 @@ TEST_CASE ("WebAgentBridge requires the session token before serving any op", "[
     const auto r1 = recvReply (c, 2000);
     REQUIRE (r1.isObject());
     REQUIRE_FALSE ((bool) r1.getProperty ("ok", true));
-    REQUIRE (r1.getProperty ("error", juce::var()).toString() == "auth required");
+    const auto err1 = r1.getProperty ("error", juce::var());
+    REQUIRE (err1.getProperty ("code", juce::var()).toString() == "AUTH_REQUIRED");
+    REQUIRE (err1.getProperty ("message", juce::var()).toString() == "auth required");
 
     // Correct token -> served (and the connection is now authenticated).
     REQUIRE (sendLine (c, "{\"id\":2,\"op\":\"ping\",\"token\":\"" + token + "\"}"));
@@ -189,7 +191,9 @@ TEST_CASE ("WebAgentBridge rejects an unknown op", "[web_agent][bridge]")
     const auto r = recvReply (*c, 2000);
     REQUIRE_FALSE ((bool) r.getProperty ("ok", true));
     REQUIRE ((int) r.getProperty ("id", -1) == 9); // reply echoes the request id
-    REQUIRE (r.getProperty ("error", juce::var()).toString().contains ("unknown op"));
+    const auto unknownErr = r.getProperty ("error", juce::var());
+    REQUIRE (unknownErr.getProperty ("code", juce::var()).toString() == "UNKNOWN_OP");
+    REQUIRE (unknownErr.getProperty ("message", juce::var()).toString().contains ("unknown op"));
 
     bridge.stop();
 }
@@ -225,7 +229,9 @@ TEST_CASE ("WebAgentBridge eval returns the evaluator result and surfaces its er
     const auto bad = recvReply (*c, 3000);
     REQUIRE_FALSE ((bool) bad.getProperty ("ok", true));
     REQUIRE ((int) bad.getProperty ("id", -1) == 11);
-    REQUIRE (bad.getProperty ("error", juce::var()).toString() == "kaboom");
+    const auto badErr = bad.getProperty ("error", juce::var());
+    REQUIRE (badErr.getProperty ("code", juce::var()).toString() == "EVAL_ERROR");
+    REQUIRE (badErr.getProperty ("message", juce::var()).toString() == "kaboom");
 
     bridge.stop();
 }
@@ -294,7 +300,9 @@ TEST_CASE ("WebAgentBridge shot returns the path, surfaces errors, and threads t
     REQUIRE (sendLine (*c, R"({"id":31,"op":"shot","path":"/tmp/fail.png"})"));
     const auto bad = recvReply (*c, 3000);
     REQUIRE_FALSE ((bool) bad.getProperty ("ok", true));
-    REQUIRE (bad.getProperty ("error", juce::var()).toString() == "capture failed");
+    const auto badErr = bad.getProperty ("error", juce::var());
+    REQUIRE (badErr.getProperty ("code", juce::var()).toString() == "SCREENSHOT_FAILED");
+    REQUIRE (badErr.getProperty ("message", juce::var()).toString() == "capture failed");
 
     bridge.stop();
 }
@@ -312,7 +320,9 @@ TEST_CASE ("WebAgentBridge eval without a registered evaluator reports 'no webvi
     REQUIRE (sendLine (*c, R"({"id":40,"op":"eval","code":"1"})"));
     const auto r = recvReply (*c, 3000);
     REQUIRE_FALSE ((bool) r.getProperty ("ok", true));
-    REQUIRE (r.getProperty ("error", juce::var()).toString() == "no webview");
+    const auto noEvalErr = r.getProperty ("error", juce::var());
+    REQUIRE (noEvalErr.getProperty ("code", juce::var()).toString() == "NO_WEBVIEW");
+    REQUIRE (noEvalErr.getProperty ("message", juce::var()).toString() == "no webview");
 
     bridge.stop();
 }
@@ -388,7 +398,7 @@ TEST_CASE ("WebAgentBridge hello reports protocol version + capabilities", "[web
 
     REQUIRE ((bool) r.getProperty ("ok", false));
     REQUIRE ((int) r.getProperty ("id", -1) == 50);
-    REQUIRE ((int) r.getProperty ("protocolVersion", 0) == 1);
+    REQUIRE ((int) r.getProperty ("protocolVersion", 0) == 2);
     REQUIRE ((bool) r.getProperty ("authRequired", false)); // token gate is active
 
     // The module build, so a client can name it when a capability is missing:

@@ -57,11 +57,24 @@ juce::DynamicObject::Ptr makeReply (const juce::var& id, const juce::String& op,
     return r;
 }
 
-juce::var makeEvalReply (const juce::var& id, bool ok, const juce::var& result, const juce::String& error)
+// Structured op-reply error: { code, message }. `code` is a stable machine-readable
+// enum (see docs/protocol.md) so clients branch on the type, not the wording; `message`
+// stays human-readable. This is the op-reply error shape ONLY — sink `error` events
+// (streamed console/uncaught page errors) are a different thing and keep their shape.
+juce::var makeError (const juce::String& code, const juce::String& message)
+{
+    juce::DynamicObject::Ptr e (new juce::DynamicObject());
+    e->setProperty ("code", code);
+    e->setProperty ("message", message);
+    return juce::var (e.get());
+}
+
+juce::var makeEvalReply (const juce::var& id, bool ok, const juce::var& result,
+                         const juce::String& errorCode, const juce::String& errorMessage)
 {
     auto r = makeReply (id, "eval", ok);
-    if (ok)                 r->setProperty ("result", result);
-    if (error.isNotEmpty()) r->setProperty ("error", error);
+    if (ok)                                                r->setProperty ("result", result);
+    if (errorCode.isNotEmpty() || errorMessage.isNotEmpty()) r->setProperty ("error", makeError (errorCode, errorMessage));
     return juce::var (r.get());
 }
 
@@ -75,11 +88,12 @@ juce::var makeBoundsReply (const juce::var& id, juce::Rectangle<int> b)
     return juce::var (r.get());
 }
 
-juce::var makeShotReply (const juce::var& id, bool ok, const juce::String& path, const juce::String& error)
+juce::var makeShotReply (const juce::var& id, bool ok, const juce::String& path,
+                         const juce::String& errorCode, const juce::String& errorMessage)
 {
     auto r = makeReply (id, "shot", ok);
-    if (path.isNotEmpty())  r->setProperty ("path", path);
-    if (error.isNotEmpty()) r->setProperty ("error", error);
+    if (path.isNotEmpty())                                  r->setProperty ("path", path);
+    if (errorCode.isNotEmpty() || errorMessage.isNotEmpty()) r->setProperty ("error", makeError (errorCode, errorMessage));
     return juce::var (r.get());
 }
 
@@ -318,7 +332,7 @@ struct WebAgentBridge::Impl : public std::enable_shared_from_this<WebAgentBridge
             if (msg.getProperty ("token", juce::var()).toString() != token)
             {
                 auto r = makeReply (id, op.isNotEmpty() ? op : juce::String ("auth"), false);
-                r->setProperty ("error", "auth required");
+                r->setProperty ("error", makeError ("AUTH_REQUIRED", "auth required"));
                 conn->write (makeLine (juce::var (r.get())));
                 return;
             }
@@ -336,7 +350,7 @@ struct WebAgentBridge::Impl : public std::enable_shared_from_this<WebAgentBridge
             }
         }
 
-        conn->write (makeLine (makeEvalReply (id, false, {}, "unknown op: " + op)));
+        conn->write (makeLine (makeEvalReply (id, false, {}, "UNKNOWN_OP", "unknown op: " + op)));
     }
 
     void handleHello (const std::shared_ptr<Connection>& conn, const juce::var& id, const juce::var&)
@@ -344,7 +358,7 @@ struct WebAgentBridge::Impl : public std::enable_shared_from_this<WebAgentBridge
         // Capabilities handshake: lets a client learn the protocol surface up
         // front (e.g. screenshotAvailable) instead of probing op-by-op.
         auto r = makeReply (id, "hello", true);
-        r->setProperty ("protocolVersion", 1);
+        r->setProperty ("protocolVersion", 2);
         // The module build the host embeds. protocolVersion only moves on a
         // BREAKING change, so it cannot tell a client whose plugin was built
         // against an older pin; this names that build outright. Additive field.
@@ -445,14 +459,14 @@ struct WebAgentBridge::Impl : public std::enable_shared_from_this<WebAgentBridge
             if (! fn)
             {
                 if (auto c = weakConn.lock())
-                    c->write (makeLine (makeEvalReply (id, false, {}, "no webview")));
+                    c->write (makeLine (makeEvalReply (id, false, {}, "NO_WEBVIEW", "no webview")));
                 return;
             }
 
             fn (code, [weakConn, id] (bool ok, juce::var result, juce::String error)
             {
                 if (auto c = weakConn.lock())
-                    c->write (makeLine (makeEvalReply (id, ok, result, error)));
+                    c->write (makeLine (makeEvalReply (id, ok, result, ok ? juce::String() : juce::String ("EVAL_ERROR"), error)));
             });
         });
     }
@@ -477,7 +491,7 @@ struct WebAgentBridge::Impl : public std::enable_shared_from_this<WebAgentBridge
             auto r = makeReply (id, "layerdebug", ok);
             r->setProperty ("enabled", enabled);
             if (! ok)
-                r->setProperty ("error", "no WKWebView found or SPI unavailable (non-mac backend?)");
+                r->setProperty ("error", makeError ("LAYER_UNAVAILABLE", "no WKWebView found or SPI unavailable (non-mac backend?)"));
 
             if (auto c = weakConn.lock())
                 c->write (makeLine (juce::var (r.get())));
@@ -505,7 +519,7 @@ struct WebAgentBridge::Impl : public std::enable_shared_from_this<WebAgentBridge
             if (ok)
                 r->setProperty ("text", juce::String (juce::CharPointer_UTF8 (text.c_str())));
             else
-                r->setProperty ("error", "no WKWebView found or SPI unavailable (non-mac backend?)");
+                r->setProperty ("error", makeError ("LAYER_UNAVAILABLE", "no WKWebView found or SPI unavailable (non-mac backend?)"));
 
             if (auto c = weakConn.lock())
                 c->write (makeLine (juce::var (r.get())));
@@ -539,7 +553,7 @@ struct WebAgentBridge::Impl : public std::enable_shared_from_this<WebAgentBridge
             if (! fn)
             {
                 if (auto c = weakConn.lock())
-                    c->write (makeLine (makeShotReply (id, false, {}, "screenshot unavailable")));
+                    c->write (makeLine (makeShotReply (id, false, {}, "SCREENSHOT_UNAVAILABLE", "screenshot unavailable")));
                 return;
             }
 
@@ -556,7 +570,7 @@ struct WebAgentBridge::Impl : public std::enable_shared_from_this<WebAgentBridge
             fn (target, crop, [weakConn, id] (bool ok, juce::String path, juce::String error)
             {
                 if (auto c = weakConn.lock())
-                    c->write (makeLine (makeShotReply (id, ok, path, error)));
+                    c->write (makeLine (makeShotReply (id, ok, path, ok ? juce::String() : juce::String ("SCREENSHOT_FAILED"), error)));
             });
         });
     }

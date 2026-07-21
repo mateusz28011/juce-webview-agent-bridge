@@ -58,6 +58,7 @@ page.close();
 - **Compositing instruments:** `page.layerDebug(true|false)` toggles the overlay borders/repaint counters; `page.layerTree()` returns the CALayer-tree text and the exported pure `parseLayerTree(text)` turns it into `[{x,y,width,height}, …]` — e.g. `parseLayerTree(await page.layerTree()).filter(l => l.width===400)` counts a specific surface's layers from a script.
 - **JUCE native fns:** `await page.backend('name', ...args)` (await result) / `page.fireBackend('name', ...args)` (fire-and-forget), over the generic `__juce__invoke` bridge.
 - **Action log:** `connect()` writes every action (click/fill/drag/backend/fire) to ONE file (`$WAE_LOG_FILE` / `connect({logFile})` / `<tmp>/web_agent_e2e.log`) + echoes to stderr, so a live run shows progress. `page.logFile` is the path; `fileLogger(path)` is exported.
+- **Typed failures:** a failed op rejects with `BridgeOpError` (exported) carrying `.code` — a `BridgeErrorCode` (`NO_WEBVIEW`/`EVAL_ERROR`/`SCREENSHOT_UNAVAILABLE`/`SCREENSHOT_FAILED`/`LAYER_UNAVAILABLE`/`AUTH_REQUIRED`/`UNKNOWN_OP`) — plus `.message`. Branch on `e.code`, not message text.
 - Stays **app-agnostic** — put app-specific selectors / native-fn names / state getters in your *project* (thin wrappers over `backend`/`fireBackend`/`readBig`), never in `e2e.mjs`.
 
 ## Diagnostic techniques
