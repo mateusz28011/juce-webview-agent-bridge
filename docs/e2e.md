@@ -7,12 +7,10 @@ API summary (Selectors / Page / Locator / `expect`), see the
 
 ## Live page events
 
-The bridge broadcasts captured `console` / `error` / `net` / `navigation` events as
-`sink` frames on the same authenticated socket, so the e2e client can await them
-Playwright-style. A `navigation` event (`data: {url, title}`) fires on every page
-(re)load — await it to know a reload wiped your injected state. A freshly-connected
-client only sees events from *now on*, so set up the wait **before** the action that
-triggers it:
+The bridge broadcasts captured `console` / `error` / `net` events as `sink` frames
+on the same authenticated socket, so the e2e client can await them Playwright-style.
+A freshly-connected client only sees events from *now on*, so set up the wait
+**before** the action that triggers it:
 
 ```js
 const [resp] = await Promise.all([

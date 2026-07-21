@@ -9,32 +9,6 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
-/** Parse a discovery JSON file, or null if missing/unreadable/invalid. */
-function readDiscoveryFile(p) {
-    try {
-        return JSON.parse(fs.readFileSync(p, 'utf8'));
-    }
-    catch {
-        return null;
-    }
-}
-/** Enumerate every registered bridge instance — the per-port files under
- *  `<home>/.web_agent_bridge.d`, sorted by port. Each entry is the full discovery
- *  record (`{port, token, pid, processName, startedAt, label?}`), so a client can
- *  present a readable instance list instead of blindly picking the lowest port. */
-export function listInstances() {
-    const dir = path.join(os.homedir(), '.web_agent_bridge.d');
-    try {
-        return fs.readdirSync(dir)
-            .filter((f) => f.endsWith('.json'))
-            .map((f) => readDiscoveryFile(path.join(dir, f)))
-            .filter((d) => d !== null && typeof d.port === 'number')
-            .sort((a, b) => a.port - b.port);
-    }
-    catch {
-        return [];
-    }
-}
 /** The port the host tries first (it scans upward on collision); clients fall
  *  back to it when no discovery file exists. Mirrors WebAgentBridge::start(). */
 export const DEFAULT_PORT = 8930;
@@ -47,31 +21,8 @@ export const DEFAULT_PORT = 8930;
  *  capability negotiation, and the `hello` reply carries both halves of it:
  *    - `ops`             — the fine-grained capability list (grows additively);
  *    - `protocolVersion` — the coarse tripwire, moved ONLY by a breaking change.
- *  So a host advertising a HIGHER protocolVersion is one this client predates.
- *
- *  v2 introduced the structured op-reply error shape (`error: {code, message}`),
- *  a breaking wire change from the v1 plain-string `error`. */
-export const CLIENT_PROTOCOL_VERSION = 2;
-/** Thrown when an op reply is `{ok:false}`. Carries the structured `code` (and optional
- *  `details`) so callers branch on the type instead of matching message text:
- *
- *    try { await page.click('#x'); }
- *    catch (e) { if (e instanceof BridgeOpError && e.code === 'NO_WEBVIEW') ...; }
- *
- *  `code` falls back to the sentinel `'UNKNOWN'` (deliberately outside BridgeErrorCode)
- *  when a `{ok:false}` reply carries no structured error object. */
-export class BridgeOpError extends Error {
-    code;
-    details;
-    constructor(error, fallbackMessage) {
-        const e = (error && typeof error === 'object' ? error : {});
-        super(typeof e.message === 'string' && e.message ? e.message : fallbackMessage);
-        this.name = 'BridgeOpError';
-        this.code = typeof e.code === 'string' ? e.code : 'UNKNOWN';
-        if (e.details && typeof e.details === 'object')
-            this.details = e.details;
-    }
-}
+ *  So a host advertising a HIGHER protocolVersion is one this client predates. */
+export const CLIENT_PROTOCOL_VERSION = 1;
 /** This npm client's own version, read from the package manifest so it cannot
  *  drift from what was published. Falls back to 'unknown' — a diagnostic string
  *  must never be the thing that throws. */
@@ -142,20 +93,32 @@ export function requireOp(caps, op, api) {
 export function loadDiscovery(preferredPort) {
     const home = os.homedir();
     const dir = path.join(home, '.web_agent_bridge.d');
+    const readJson = (p) => { try {
+        return JSON.parse(fs.readFileSync(p, 'utf8'));
+    }
+    catch {
+        return null;
+    } };
     if (preferredPort) {
-        const d = readDiscoveryFile(path.join(dir, `${preferredPort}.json`));
+        const d = readJson(path.join(dir, `${preferredPort}.json`));
         if (d)
             return d;
     }
-    const insts = listInstances();
-    if (preferredPort) {
-        const m = insts.find((d) => d.port === preferredPort);
-        if (m)
-            return m;
+    try {
+        const insts = fs.readdirSync(dir).filter((f) => f.endsWith('.json'))
+            .map((f) => readJson(path.join(dir, f)))
+            .filter((d) => d !== null && typeof d.port === 'number')
+            .sort((a, b) => a.port - b.port);
+        if (preferredPort) {
+            const m = insts.find((d) => d.port === preferredPort);
+            if (m)
+                return m;
+        }
+        if (insts.length)
+            return insts[0];
     }
-    if (insts.length)
-        return insts[0];
-    return readDiscoveryFile(path.join(home, '.web_agent_bridge.json')) || {};
+    catch { /* no dir -> fall through to legacy */ }
+    return readJson(path.join(home, '.web_agent_bridge.json')) || {};
 }
 /** Attach an NDJSON reader to a socket: reassembles newline-delimited JSON
  *  lines across TCP chunks (multi-byte-safe via StringDecoder) and calls fn

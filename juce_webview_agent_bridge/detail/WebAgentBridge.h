@@ -74,17 +74,8 @@ public:
                for client auto-discovery. Empty (the default) uses
                ~/.web_agent_bridge.json. Override it to isolate a test run, or to
                give each instance its own file when several embed the bridge at
-               once (the default shared path would otherwise collide).
-        @param allowUnauthenticatedLoopback  what to do when the session token
-               cannot be published (its discovery file is unwritable). The bridge
-               executes arbitrary JavaScript, so it fails CLOSED by default: it
-               refuses to start and returns 0 rather than silently accepting
-               unauthenticated clients. Pass true only to deliberately opt into an
-               open, tokenless loopback bridge (e.g. a dev box whose home dir is
-               not writable) — then a publish failure keeps the old fail-open
-               behaviour (token disabled, every loopback client authorised). */
-    int  start (int preferredPort = 8930, juce::File discoveryFileOverride = {},
-                bool allowUnauthenticatedLoopback = false);
+               once (the default shared path would otherwise collide). */
+    int  start (int preferredPort = 8930, juce::File discoveryFileOverride = {});
     void stop();
 
     bool isRunning() const noexcept;
@@ -101,24 +92,6 @@ public:
         Called from the registered native sink function (message thread). */
     void pushSink (const juce::var& event);
 
-    /** Cap simultaneously-connected clients (default 16; 0 = unlimited). One
-        blocking read thread runs per client, so this bounds a local process from
-        exhausting threads by opening many connections. Beyond the cap, a new
-        connection is accepted and immediately closed. */
-    void setMaxConnections (int maxConnections);
-
-    /** Tune the sink buffers: `queueMax` is the pending-broadcast backlog before the
-        oldest events are dropped (default 4096, floored at 1); `historyMax` is how
-        many recent frames `sink_replay` can resend (default 1024, 0 disables replay).
-        Take effect immediately. */
-    void setSinkLimits (int queueMax, int historyMax);
-
-    /** Optional human-readable label published in this instance's discovery record
-        (`label`), so a client listing several instances of the same plugin can show
-        which is which. The module already advertises `pid`, `processName`, and
-        `startedAt`; the embedder alone knows a meaningful name. Set before start(). */
-    void setInstanceLabel (const juce::String& label);
-
 private:
     struct Impl;
     std::shared_ptr<Impl> impl;
@@ -127,31 +100,13 @@ private:
 };
 
 //==============================================================================
-/** Which page-capture hooks the injected script installs. All on by default; turn
-    any off to avoid patching an API the host page already instruments or checks the
-    identity of. Each hook is fail-silent, so disabling one only stops its events. */
-struct CaptureOptions
-{
-    bool console     = true;  // console.log/info/warn/error/debug
-    bool errors      = true;  // window 'error' + 'unhandledrejection'
-    bool timing      = true;  // passive PerformanceObserver resource timing
-    bool fetch       = true;  // window.fetch
-    bool xhr         = true;  // XMLHttpRequest
-    bool webSocket   = true;  // WebSocket
-    bool eventSource = true;  // EventSource / SSE
-    bool beacon      = true;  // navigator.sendBeacon
-    bool navigation  = true;  // emit a `navigation` sink event on every page (re)load
-};
-
 /** Folds the capture layer into a WebBrowserComponent::Options:
       - injects the page capture script (console/network) at document-start,
       - registers the "__webAgentSink" native function that feeds pushSink().
-    `captureOptions` selects which hooks the script installs (default: all).
     Returns the augmented Options (value semantics, chainable). */
 juce::WebBrowserComponent::Options
 withCapture (juce::WebBrowserComponent::Options options,
-             std::weak_ptr<WebAgentBridge> bridge,
-             CaptureOptions captureOptions = {});
+             std::weak_ptr<WebAgentBridge> bridge);
 
 /** Wires the bridge's eval + bounds callbacks to a live WebView. Holds the
     components weakly (juce::Component::SafePointer), so it is safe even if the

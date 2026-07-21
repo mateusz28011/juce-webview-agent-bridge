@@ -71,12 +71,8 @@ inline const char* kCaptureScript = R"WEBAGENTJS(
   }
   window.__webAgentSend = send;
 
-  // Which hooks to install (set by withCapture; each key defaults ON when absent).
-  var HOOKS = window.__webAgentCaptureHooks || {};
-  function hookOn(k) { return HOOKS[k] !== false; }
-
   // --- console.* ---
-  if (hookOn('console')) ['log', 'info', 'warn', 'error', 'debug'].forEach(function (level) {
+  ['log', 'info', 'warn', 'error', 'debug'].forEach(function (level) {
     var orig = console[level] ? console[level].bind(console) : function () {};
     console[level] = function () {
       try {
@@ -90,7 +86,6 @@ inline const char* kCaptureScript = R"WEBAGENTJS(
   });
 
   // --- uncaught errors / rejections ---
-  if (hookOn('errors')) {
   window.addEventListener('error', function (ev) {
     send('error', {
       message: clip(ev.message), source: ev.filename, line: ev.lineno, col: ev.colno,
@@ -105,10 +100,9 @@ inline const char* kCaptureScript = R"WEBAGENTJS(
       stack: r && r.stack ? clip(r.stack) : undefined
     });
   });
-  }
 
   // --- passive resource timing (all sub-resources, no body) ---
-  if (hookOn('timing')) try {
+  try {
     if (window.performance && performance.setResourceTimingBufferSize)
       performance.setResourceTimingBufferSize(2000);
     new PerformanceObserver(function (list) {
@@ -122,7 +116,7 @@ inline const char* kCaptureScript = R"WEBAGENTJS(
   } catch (e) {}
 
   // --- fetch (request + response bodies/headers when capture enabled; clone BEFORE read) ---
-  if (hookOn('fetch') && window.fetch) {
+  if (window.fetch) {
     var of = window.fetch;
     window.fetch = function () {
       var args = arguments, url = '', method = 'GET';
@@ -168,7 +162,7 @@ inline const char* kCaptureScript = R"WEBAGENTJS(
   }
 
   // --- XMLHttpRequest ---
-  if (hookOn('xhr')) try {
+  try {
     var OX = window.XMLHttpRequest;
     if (OX) {
       var open = OX.prototype.open, sendm = OX.prototype.send, setHdr = OX.prototype.setRequestHeader;
@@ -202,7 +196,7 @@ inline const char* kCaptureScript = R"WEBAGENTJS(
 
   // --- WebSocket (open/close/error always; frames + bodies only when capture is
   //     on, so a chatty socket doesn't flood the ring buffer by default) ---
-  if (hookOn('ws')) try {
+  try {
     var OWS = window.WebSocket;
     if (OWS) {
       var WS = function (url, protocols) {
@@ -232,7 +226,7 @@ inline const char* kCaptureScript = R"WEBAGENTJS(
   } catch (e) {}
 
   // --- EventSource / SSE (open/error always; message bodies only when capture on) ---
-  if (hookOn('sse')) try {
+  try {
     var OES = window.EventSource;
     if (OES) {
       var ES = function (url, cfg) {
@@ -254,7 +248,7 @@ inline const char* kCaptureScript = R"WEBAGENTJS(
   } catch (e) {}
 
   // --- navigator.sendBeacon (url always; body only when capture on) ---
-  if (hookOn('beacon')) try {
+  try {
     if (window.navigator && typeof navigator.sendBeacon === 'function') {
       var ob = navigator.sendBeacon.bind(navigator);
       navigator.sendBeacon = function (url, data) {
@@ -266,17 +260,6 @@ inline const char* kCaptureScript = R"WEBAGENTJS(
         return ob(url, data);
       };
     }
-  } catch (e) {}
-
-  // --- navigation / reload signal: this script re-injects at document-start on every
-  //     committed navigation, so emitting here tells a client the page (re)loaded and
-  //     any state it injected was wiped — the failure that otherwise looks like nothing
-  //     happened. window.location/document guarded so it stays safe in odd contexts. ---
-  if (hookOn('navigation')) try {
-    send('navigation', {
-      url: clip((window.location && location.href) || ''),
-      title: clip((window.document && document.title) || '')
-    });
   } catch (e) {}
 
   send('console', { level: 'info', args: ['[web_agent] capture installed'] });

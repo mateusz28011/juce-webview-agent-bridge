@@ -2,22 +2,8 @@ import type { Socket } from 'node:net';
 export interface Discovery {
     port?: number;
     token?: string;
-    /** Instance identity (added by the host so several copies of the same plugin can
-     *  be told apart). `pid`/`processName`/`startedAt` are module-derived; `label` is
-     *  whatever the embedder set via setInstanceLabel(). All absent on older hosts. */
-    pid?: number;
-    processName?: string;
-    startedAt?: string;
-    label?: string;
     [key: string]: unknown;
 }
-/** Enumerate every registered bridge instance — the per-port files under
- *  `<home>/.web_agent_bridge.d`, sorted by port. Each entry is the full discovery
- *  record (`{port, token, pid, processName, startedAt, label?}`), so a client can
- *  present a readable instance list instead of blindly picking the lowest port. */
-export declare function listInstances(): Array<Discovery & {
-    port: number;
-}>;
 /** The port the host tries first (it scans upward on collision); clients fall
  *  back to it when no discovery file exists. Mirrors WebAgentBridge::start(). */
 export declare const DEFAULT_PORT = 8930;
@@ -30,11 +16,8 @@ export declare const DEFAULT_PORT = 8930;
  *  capability negotiation, and the `hello` reply carries both halves of it:
  *    - `ops`             — the fine-grained capability list (grows additively);
  *    - `protocolVersion` — the coarse tripwire, moved ONLY by a breaking change.
- *  So a host advertising a HIGHER protocolVersion is one this client predates.
- *
- *  v2 introduced the structured op-reply error shape (`error: {code, message}`),
- *  a breaking wire change from the v1 plain-string `error`. */
-export declare const CLIENT_PROTOCOL_VERSION = 2;
+ *  So a host advertising a HIGHER protocolVersion is one this client predates. */
+export declare const CLIENT_PROTOCOL_VERSION = 1;
 /** The `hello` handshake. `moduleVersion` is absent on hosts built against a
  *  module older than the release that started reporting it. */
 export interface BridgeCapabilities {
@@ -44,31 +27,6 @@ export interface BridgeCapabilities {
     screenshotAvailable: boolean;
     authRequired: boolean;
     moduleVersion?: string;
-}
-/** Stable machine-readable codes for op-reply errors (`{ok:false, error:{code,message}}`).
- *  Branch on `code`, never the human `message`. Mirrors the C++ makeError() sites and
- *  docs/protocol.md. This is the OP-REPLY error taxonomy ONLY — sink `error` events
- *  (streamed page console/uncaught errors) are a different thing entirely. */
-export type BridgeErrorCode = 'AUTH_REQUIRED' | 'UNKNOWN_OP' | 'NO_WEBVIEW' | 'EVAL_ERROR' | 'SCREENSHOT_UNAVAILABLE' | 'SCREENSHOT_FAILED' | 'LAYER_UNAVAILABLE';
-/** The `error` object on a failed op reply. `code` is typed wide (union | string) so a
- *  newer host's code never fails this client's parse. */
-export interface BridgeError {
-    code: BridgeErrorCode | string;
-    message: string;
-    details?: Record<string, unknown>;
-}
-/** Thrown when an op reply is `{ok:false}`. Carries the structured `code` (and optional
- *  `details`) so callers branch on the type instead of matching message text:
- *
- *    try { await page.click('#x'); }
- *    catch (e) { if (e instanceof BridgeOpError && e.code === 'NO_WEBVIEW') ...; }
- *
- *  `code` falls back to the sentinel `'UNKNOWN'` (deliberately outside BridgeErrorCode)
- *  when a `{ok:false}` reply carries no structured error object. */
-export declare class BridgeOpError extends Error {
-    readonly code: BridgeErrorCode | string;
-    readonly details?: Record<string, unknown>;
-    constructor(error: unknown, fallbackMessage: string);
 }
 /** This npm client's own version, read from the package manifest so it cannot
  *  drift from what was published. Falls back to 'unknown' — a diagnostic string

@@ -49,7 +49,7 @@ function startMock({ onEval, onShot, onLayerTree, hello = {}, dropOnHello = fals
           // every guarded op. `hello` overrides simulate an older/newer host.
           state.helloCount++;
           if (dropOnHello) { sock.destroy(); return; } // transport failure, not a legacy host
-          reply({ op: 'hello', ok: true, protocolVersion: 2, platform: 'mac',
+          reply({ op: 'hello', ok: true, protocolVersion: 1, platform: 'mac',
                   moduleVersion: '0.4.0',
                   ops: ['hello', 'ping', 'auth', 'eval', 'bounds', 'shot', 'layerdebug', 'layertree', 'sink_replay'],
                   screenshotAvailable: true, authRequired: true, ...hello });
@@ -65,7 +65,7 @@ function startMock({ onEval, onShot, onLayerTree, hello = {}, dropOnHello = fals
           state.evals.push(m.code);
           let result;
           try { result = onEval ? onEval(m.code, state) : 'ok'; }
-          catch (e) { reply({ op: 'eval', ok: false, error: { code: 'EVAL_ERROR', message: String(e) } }); continue; }
+          catch (e) { reply({ op: 'eval', ok: false, error: String(e) }); continue; }
           reply({ op: 'eval', ok: true, result });
           continue;
         }
@@ -80,11 +80,11 @@ function startMock({ onEval, onShot, onLayerTree, hello = {}, dropOnHello = fals
           continue;
         }
         if (m.op === 'layertree') {
-          const r = onLayerTree ? onLayerTree(m) : { ok: false, error: { code: 'LAYER_UNAVAILABLE', message: 'no WKWebView found' } };
+          const r = onLayerTree ? onLayerTree(m) : { ok: false, error: 'no WKWebView found' };
           reply({ op: 'layertree', ...r });
           continue;
         }
-        reply({ op: m.op, ok: false, error: { code: 'UNKNOWN_OP', message: 'unknown' } });
+        reply({ op: m.op, ok: false, error: 'unknown' });
       }
     });
   });
@@ -497,7 +497,7 @@ test('a host too old to answer hello stays usable (guards stand down)', async ()
   // that used to work, so caps stay null and every requireOp() is a no-op.
   const { server, port } = await startMock({
     onEval: () => 'ok',
-    hello: { ok: false, error: { code: 'UNKNOWN_OP', message: 'unknown op: hello' }, ops: undefined },
+    hello: { ok: false, error: 'unknown op: hello', ops: undefined },
   });
   try {
     const page = await openPage(port);
@@ -536,7 +536,7 @@ test('capabilities() reports moduleVersion and reuses the connect handshake', as
     const page = await openPage(port);
     const caps = await page.capabilities();
     assert.equal(caps.moduleVersion, '0.4.0');
-    assert.equal(caps.protocolVersion, 2);
+    assert.equal(caps.protocolVersion, 1);
     assert.ok(caps.ops.includes('layertree'));
     assert.equal(state.helloCount, 1, 'handshake taken once at connect, not re-requested');
     page.close();
@@ -580,18 +580,6 @@ test('waitForEvent matches an error event by predicate', async () => {
   } finally { server.close(); }
 });
 
-test('waitForEvent resolves on a navigation (reload) event', async () => {
-  const { server, port, pushSink } = await startMock({ onEval: () => 'ok' });
-  try {
-    const page = await openPage(port);
-    const pending = page.waitForEvent('navigation', { timeout: 1000 });
-    pushSink({ kind: 'navigation', t: 1, data: { url: 'https://app.test/next', title: 'Next' } });
-    const ev = await pending;
-    assert.equal(ev.data.url, 'https://app.test/next');
-    page.close();
-  } finally { server.close(); }
-});
-
 test('waitForFunction polls a page expression until it is truthy', async () => {
   let n = 0;
   const onEval = (code) => {
@@ -622,7 +610,7 @@ test('page.screenshot issues the shot op and returns the host path', async () =>
 });
 
 test('page.screenshot surfaces a shot failure as a thrown error', async () => {
-  const { server, port } = await startMock({ onEval: () => 'ok', onShot: () => ({ ok: false, error: { code: 'SCREENSHOT_UNAVAILABLE', message: 'screenshot unavailable' } }) });
+  const { server, port } = await startMock({ onEval: () => 'ok', onShot: () => ({ ok: false, error: 'screenshot unavailable' }) });
   try {
     const page = await openPage(port);
     await assert.rejects(() => page.screenshot(), /screenshot unavailable/);
@@ -635,7 +623,7 @@ test('page.capabilities returns the hello handshake', async () => {
   try {
     const page = await openPage(port);
     const caps = await page.capabilities();
-    assert.equal(caps.protocolVersion, 2);
+    assert.equal(caps.protocolVersion, 1);
     assert.equal(caps.platform, 'mac');
     assert.ok(caps.ops.includes('shot'));
     assert.equal(caps.screenshotAvailable, true);
