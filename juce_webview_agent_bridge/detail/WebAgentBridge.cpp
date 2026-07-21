@@ -900,10 +900,25 @@ void WebAgentBridge::pushSink (const juce::var& event)
 
 //==============================================================================
 juce::WebBrowserComponent::Options
-withCapture (juce::WebBrowserComponent::Options options, std::weak_ptr<WebAgentBridge> bridge)
+withCapture (juce::WebBrowserComponent::Options options, std::weak_ptr<WebAgentBridge> bridge,
+             CaptureOptions captureOptions)
 {
+    // Publish the enabled-hook set so the page script installs only what's asked
+    // (each key defaults on in the script, so this only ever turns things off).
+    juce::DynamicObject::Ptr hooks (new juce::DynamicObject());
+    hooks->setProperty ("console", captureOptions.console);
+    hooks->setProperty ("errors",  captureOptions.errors);
+    hooks->setProperty ("timing",  captureOptions.timing);
+    hooks->setProperty ("fetch",   captureOptions.fetch);
+    hooks->setProperty ("xhr",     captureOptions.xhr);
+    hooks->setProperty ("ws",      captureOptions.webSocket);
+    hooks->setProperty ("sse",     captureOptions.eventSource);
+    hooks->setProperty ("beacon",  captureOptions.beacon);
+    const auto prelude = "window.__webAgentCaptureHooks = "
+                       + juce::JSON::toString (juce::var (hooks.get()), true) + ";\n";
+
     return options
-        .withUserScript (kCaptureScript)
+        .withUserScript (prelude + juce::String (kCaptureScript))
         .withNativeFunction ("__webAgentSink",
             [bridge] (const juce::Array<juce::var>& args,
                       juce::WebBrowserComponent::NativeFunctionCompletion completion)

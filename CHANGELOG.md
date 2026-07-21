@@ -7,6 +7,10 @@ commit comparisons are available from the linked GitHub Releases.
 
 ### Added
 
+- `withCapture()` now takes a `CaptureOptions` argument selecting which page hooks
+  the injected script installs — console, errors, resource timing, fetch, XHR,
+  WebSocket, EventSource, and sendBeacon (all on by default) — so a host page whose
+  own instrumentation collides with one of them can disable just that hook.
 - Discovery records now carry instance identity — `pid`, `processName`,
   `startedAt`, and an optional `label` set via `setInstanceLabel()` — so several
   copies of the same plugin in a host can be told apart instead of guessing from

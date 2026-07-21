@@ -127,13 +127,30 @@ private:
 };
 
 //==============================================================================
+/** Which page-capture hooks the injected script installs. All on by default; turn
+    any off to avoid patching an API the host page already instruments or checks the
+    identity of. Each hook is fail-silent, so disabling one only stops its events. */
+struct CaptureOptions
+{
+    bool console     = true;  // console.log/info/warn/error/debug
+    bool errors      = true;  // window 'error' + 'unhandledrejection'
+    bool timing      = true;  // passive PerformanceObserver resource timing
+    bool fetch       = true;  // window.fetch
+    bool xhr         = true;  // XMLHttpRequest
+    bool webSocket   = true;  // WebSocket
+    bool eventSource = true;  // EventSource / SSE
+    bool beacon      = true;  // navigator.sendBeacon
+};
+
 /** Folds the capture layer into a WebBrowserComponent::Options:
       - injects the page capture script (console/network) at document-start,
       - registers the "__webAgentSink" native function that feeds pushSink().
+    `captureOptions` selects which hooks the script installs (default: all).
     Returns the augmented Options (value semantics, chainable). */
 juce::WebBrowserComponent::Options
 withCapture (juce::WebBrowserComponent::Options options,
-             std::weak_ptr<WebAgentBridge> bridge);
+             std::weak_ptr<WebAgentBridge> bridge,
+             CaptureOptions captureOptions = {});
 
 /** Wires the bridge's eval + bounds callbacks to a live WebView. Holds the
     components weakly (juce::Component::SafePointer), so it is safe even if the
