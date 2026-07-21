@@ -5,7 +5,7 @@
 
    ID:                 juce_webview_agent_bridge
    vendor:             mateusz28011
-   version:            0.5.2
+   version:            0.6.0
    name:               Web Agent Bridge
    description:        Debug-only loopback bridge that lets an external agent drive a live juce::WebBrowserComponent — eval JS, stream console/network, query on-screen bounds for OS-level screenshots. No CDP required (works on WKWebView and WebView2).
    website:            https://github.com/mateusz28011/juce-webview-agent-bridge
@@ -47,6 +47,6 @@
     reply so a client that finds a capability missing can name the exact module
     build the host embeds. scripts/release.sh owns both sites and verifies them.
 */
-#define WEB_AGENT_BRIDGE_VERSION "0.5.2"
+#define WEB_AGENT_BRIDGE_VERSION "0.6.0"
 
 #include "detail/WebAgentBridge.h"
