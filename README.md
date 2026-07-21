@@ -89,7 +89,7 @@ or with CMake `FetchContent` (after JUCE has been added, so
 include(FetchContent)
 FetchContent_Declare(juce_webview_agent_bridge
     GIT_REPOSITORY https://github.com/mateusz28011/juce-webview-agent-bridge.git
-    GIT_TAG        v0.5.1)
+    GIT_TAG        v0.5.2)
 FetchContent_MakeAvailable(juce_webview_agent_bridge)
 ```
 
