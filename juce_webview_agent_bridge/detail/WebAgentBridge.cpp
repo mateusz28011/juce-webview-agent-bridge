@@ -25,6 +25,7 @@
 
 #if ! JUCE_WINDOWS
  #include <cerrno>
+ #include <poll.h>       // wait for socket writability when the send buffer fills
  #include <sys/socket.h> // ::send()/MSG_NOSIGNAL/SO_NOSIGPIPE — keep SIGPIPE from killing the host
  #include <sys/stat.h>   // chmod() — 0600 on the plaintext-token discovery file
  #include <unistd.h>     // getpid() — process id in the discovery record
@@ -147,6 +148,14 @@ bool writeAll (juce::StreamingSocket& socket, const char* data, size_t len)
         const auto n = ::send (fd, data + sent, len - sent, sendFlags);
         if (n > 0)                    { sent += (size_t) n; continue; }
         if (n < 0 && errno == EINTR)  continue;         // interrupted: retry
+        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
+        {
+            // Send buffer full (the socket is non-blocking): wait for it to drain
+            // rather than treating a large write as a dead peer, then retry.
+            struct pollfd pfd { fd, POLLOUT, 0 };
+            ::poll (&pfd, 1, 1000);
+            continue;
+        }
         return false;                                   // EPIPE/ECONNRESET/other: peer gone
     }
     return true;
@@ -338,7 +347,7 @@ struct WebAgentBridge::Impl : public std::enable_shared_from_this<WebAgentBridge
     // advertisement can no longer drift from the dispatch.
     using OpHandler = void (Impl::*) (const std::shared_ptr<Connection>&, const juce::var& id, const juce::var& msg);
     struct OpEntry { const char* name; OpHandler fn; };
-    static const OpEntry kOpTable[9];
+    static const OpEntry kOpTable[10];
 
     // Post-gate auth: the connection is already authenticated (or no token is
     // set), so a stray {"op":"auth"} is simply acknowledged.
@@ -506,6 +515,80 @@ struct WebAgentBridge::Impl : public std::enable_shared_from_this<WebAgentBridge
             {
                 if (auto c = weakConn.lock())
                     c->write (makeLine (makeEvalReply (id, ok, result, ok ? juce::String() : juce::String ("EVAL_ERROR"), error)));
+            });
+        });
+    }
+
+    // eval_big: return a large eval result in ONE request. WKWebView's
+    // evaluateJavascript stalls on >~100KB single returns, so instead of the client
+    // polling sub-threshold chunks over the socket, the host does it: stringify the
+    // value into a page global once, then read it back here in <100KB slices and
+    // reassemble. Self-contained — uses its own `window.__webAgentBig` global, not the
+    // e2e client's `__wae` helpers, so it works without them.
+    void handleEvalBig (const std::shared_ptr<Connection>& conn, const juce::var& id, const juce::var& msg)
+    {
+        const auto code = msg.getProperty ("code", juce::var()).toString();
+        std::weak_ptr<Impl>       weakSelf = shared_from_this();
+        std::weak_ptr<Connection> weakConn = conn;
+
+        juce::MessageManager::callAsync ([weakSelf, weakConn, id, code]()
+        {
+            auto self = weakSelf.lock();
+            if (! self || ! self->running.load()) return;
+
+            EvalFn fn;
+            {
+                std::lock_guard<std::mutex> lk (self->fnMutex);
+                fn = self->evalFn;
+            }
+
+            auto reply = [weakConn, id] (bool ok, const juce::String& result,
+                                         const juce::String& errCode, const juce::String& errMsg)
+            {
+                if (auto c = weakConn.lock())
+                {
+                    auto r = makeReply (id, "eval_big", ok);
+                    if (ok)                r->setProperty ("result", result);
+                    if (errMsg.isNotEmpty()) r->setProperty ("error", makeError (errCode, errMsg));
+                    c->write (makeLine (juce::var (r.get())));
+                }
+            };
+
+            if (! fn) { reply (false, {}, "NO_WEBVIEW", "no webview"); return; }
+
+            struct Big { juce::String acc; int total = 0; int off = 0; };
+            auto st = std::make_shared<Big>();
+
+            // Recursive chunk reader; each eval completion fires on the message thread,
+            // so calling fn again from the callback stays on it.
+            auto readNext = std::make_shared<std::function<void()>>();
+            *readNext = [fn, st, readNext, reply]()
+            {
+                if (st->off >= st->total) { reply (true, st->acc, {}, {}); return; }
+                const int n = juce::jmin (60000, st->total - st->off); // < ~100KB stall threshold
+                fn ("window.__webAgentBig.substr(" + juce::String (st->off) + "," + juce::String (n) + ")",
+                    [st, readNext, reply, n] (bool ok, juce::var result, juce::String error)
+                {
+                    if (! ok) { reply (false, {}, "EVAL_ERROR", error); return; }
+                    st->acc += result.toString();
+                    st->off += n;
+                    (*readNext)();
+                });
+            };
+
+            // Run the code, stringify the result, stash it, return its length. A throw in
+            // `code` fails the eval itself and surfaces as EVAL_ERROR.
+            const juce::String initJs =
+                "(function(){var v=(" + code + ");"
+                "window.__webAgentBig=(typeof v==='string'?v:JSON.stringify(v));"
+                "return window.__webAgentBig.length;})()";
+
+            fn (initJs, [st, readNext, reply] (bool ok, juce::var result, juce::String error)
+            {
+                if (! ok) { reply (false, {}, "EVAL_ERROR", error); return; }
+                st->total = (int) result;
+                if (st->total <= 0) { reply (true, juce::String(), {}, {}); return; }
+                (*readNext)();
             });
         });
     }
@@ -695,11 +778,12 @@ struct WebAgentBridge::Impl : public std::enable_shared_from_this<WebAgentBridge
     }
 };
 
-const WebAgentBridge::Impl::OpEntry WebAgentBridge::Impl::kOpTable[9] = {
+const WebAgentBridge::Impl::OpEntry WebAgentBridge::Impl::kOpTable[10] = {
     { "hello",       &Impl::handleHello      },
     { "ping",        &Impl::handlePing       },
     { "auth",        &Impl::handleAuth       },
     { "eval",        &Impl::handleEval       },
+    { "eval_big",    &Impl::handleEvalBig    },
     { "bounds",      &Impl::handleBounds     },
     { "shot",        &Impl::handleShot       },
     { "layerdebug",  &Impl::handleLayerDebug },

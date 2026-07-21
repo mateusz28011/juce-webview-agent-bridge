@@ -7,6 +7,12 @@ commit comparisons are available from the linked GitHub Releases.
 
 ### Added
 
+- New `eval_big` op returns a large eval result in a single request. WKWebView's
+  `evaluateJavascript` stalls on >~100KB single returns, so the host stringifies the
+  value into a page global and reassembles it from sub-threshold slices itself —
+  moving the chunk loop off the client (which used N synchronous socket round-trips).
+  `page.readBig()` uses it automatically when the host advertises it, falling back to
+  the old client-side chunk loop on older hosts.
 - The sink stream now emits a `navigation` event (`data: {url, title}`) on every
   page (re)load, so a client can detect that a reload wiped its injected state
   (recorders, hooks, page globals) instead of the reload passing silently — the
@@ -40,6 +46,13 @@ commit comparisons are available from the linked GitHub Releases.
   `CHANGELOG.md` section (plus the comparison link) instead of GitHub's raw
   commit list, so the changelog is the single source of truth for release notes
   and there is no hand-written release body to drift or forget.
+
+### Fixed
+
+- A socket write larger than the OS send buffer (~150 KB) was truncated: the
+  non-blocking send returned `EAGAIN` and the writer treated it as a dead peer.
+  It now waits for the socket to drain and retries, so large op replies (e.g.
+  `eval_big`) arrive intact. Small replies were never affected.
 
 ### Security
 
