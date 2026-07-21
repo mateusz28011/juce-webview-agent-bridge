@@ -5,6 +5,8 @@ commit comparisons are available from the linked GitHub Releases.
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-07-21
+
 ### Fixed
 
 - The bridge no longer crashes the host process with `SIGPIPE` (exit 141) when a
@@ -141,7 +143,8 @@ There are no package API changes in this release.
 - Zero-dependency CLI, Playwright-shaped E2E client, agent skill, and standalone
   JavaScript and C++ test suites.
 
-[Unreleased]: https://github.com/mateusz28011/juce-webview-agent-bridge/compare/v0.5.1...HEAD
+[Unreleased]: https://github.com/mateusz28011/juce-webview-agent-bridge/compare/v0.5.2...HEAD
+[0.5.2]: https://github.com/mateusz28011/juce-webview-agent-bridge/releases/tag/v0.5.2
 [0.5.1]: https://github.com/mateusz28011/juce-webview-agent-bridge/releases/tag/v0.5.1
 [0.5.0]: https://github.com/mateusz28011/juce-webview-agent-bridge/releases/tag/v0.5.0
 [0.4.0]: https://github.com/mateusz28011/juce-webview-agent-bridge/releases/tag/v0.4.0
