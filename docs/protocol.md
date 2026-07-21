@@ -35,6 +35,7 @@ also carries `token` until the connection is authenticated.
 |---|---|
 | `{"op":"auth","token":"…"}` | `{"op":"auth","ok":bool,"error"?}` |
 | `{"id","op":"eval","code":"…"}` | `{"id","op":"eval","ok":bool,"result"?,"error"?}` |
+| `{"id","op":"eval_big","code":"…"}` | `{"id","op":"eval_big","ok",result?,"error"?}` — like `eval` but for large results: the host stringifies the value into a page global and reassembles it from sub-threshold slices, so a >~100KB result doesn't stall WKWebView. One request instead of a client chunk-poll loop. |
 | `{"id","op":"shot","path"?,"rect"?}` | `{"id","op":"shot","ok",path,"error"?}` (PNG written by the host; `rect`={x,y,w,h} CSS px crops to a region) |
 | `{"id","op":"bounds"}` | `{"id","op":"bounds","ok",x,y,w,h}` (screen coords) |
 | `{"id","op":"ping"}` | `{"id","op":"ping","ok":true}` |

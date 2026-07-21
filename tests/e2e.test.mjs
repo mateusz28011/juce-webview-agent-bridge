@@ -26,7 +26,7 @@ afterEach(() => { for (const p of openPages.splice(0)) { try { p.close(); } catc
 // test script the result per eval via onEval(code, state). It also tracks every
 // connected socket so a test can push unsolicited `sink` frames (the live
 // console/network/error stream) via the returned pushSink() helper.
-function startMock({ onEval, onShot, onLayerTree, hello = {}, dropOnHello = false } = {}) {
+function startMock({ onEval, onEvalBig, onShot, onLayerTree, hello = {}, dropOnHello = false } = {}) {
   const state = { evals: [], token: null, sockets: [], helloCount: 0 };
   const server = net.createServer((sock) => {
     sock.on('error', () => {});
@@ -51,7 +51,7 @@ function startMock({ onEval, onShot, onLayerTree, hello = {}, dropOnHello = fals
           if (dropOnHello) { sock.destroy(); return; } // transport failure, not a legacy host
           reply({ op: 'hello', ok: true, protocolVersion: 2, platform: 'mac',
                   moduleVersion: '0.4.0',
-                  ops: ['hello', 'ping', 'auth', 'eval', 'bounds', 'shot', 'layerdebug', 'layertree', 'sink_replay'],
+                  ops: ['hello', 'ping', 'auth', 'eval', 'eval_big', 'bounds', 'shot', 'layerdebug', 'layertree', 'sink_replay'],
                   screenshotAvailable: true, authRequired: true, ...hello });
           continue;
         }
@@ -67,6 +67,20 @@ function startMock({ onEval, onShot, onLayerTree, hello = {}, dropOnHello = fals
           try { result = onEval ? onEval(m.code, state) : 'ok'; }
           catch (e) { reply({ op: 'eval', ok: false, error: { code: 'EVAL_ERROR', message: String(e) } }); continue; }
           reply({ op: 'eval', ok: true, result });
+          continue;
+        }
+        if (m.op === 'eval_big') {
+          state.evals.push(m.code);
+          if (onEvalBig) { reply({ op: 'eval_big', ok: true, result: onEvalBig(m.code, state) }); continue; }
+          // Emulate a real host: assemble the value via the same __wae chunk protocol
+          // the readBig fallback (and these tests) mock, so switching readBig to the
+          // native op returns the same thing the fallback would.
+          try {
+            const len = onEval ? onEval(`window.__wae.chunkInit(${m.code})`, state) : 0;
+            let out = '';
+            for (let off = 0; off < len; off += 32000) out += onEval(`window.__wae.chunkAt(${off}, 32000)`, state);
+            reply({ op: 'eval_big', ok: true, result: out });
+          } catch (e) { reply({ op: 'eval_big', ok: false, error: { code: 'EVAL_ERROR', message: String(e) } }); }
           continue;
         }
         if (m.op === 'shot') {
@@ -269,7 +283,12 @@ test('readBig() reassembles a value larger than the chunk size', async () => {
     const c = chunk(code); if (c !== undefined) return c;
     return 'ok';
   };
-  const { server, port } = await startMock({ onEval });
+  // This exercises the client-side chunk loop specifically, so force the fallback
+  // (a host without the native eval_big op).
+  const { server, port } = await startMock({
+    onEval,
+    hello: { ops: ['hello', 'ping', 'auth', 'eval', 'bounds', 'shot', 'layerdebug', 'layertree', 'sink_replay'] },
+  });
   try {
     const page = await openPage(port);
     const out = await page.readBig(`'ignored'`, { chunk: 10 });
@@ -588,6 +607,38 @@ test('waitForEvent resolves on a navigation (reload) event', async () => {
     pushSink({ kind: 'navigation', t: 1, data: { url: 'https://app.test/next', title: 'Next' } });
     const ev = await pending;
     assert.equal(ev.data.url, 'https://app.test/next');
+    page.close();
+  } finally { server.close(); }
+});
+
+test('readBig uses the native eval_big op when the host advertises it', async () => {
+  const big = 'Z'.repeat(200000);
+  const { server, port, state } = await startMock({ onEval: () => 'ok', onEvalBig: () => big });
+  try {
+    const page = await openPage(port);
+    const out = await page.readBig('window.bigState');
+    assert.equal(out, big, 'gets the full native result in one request');
+    // PAGE_HELPERS defines W.chunkInit, so match the fallback CALL (window.__wae.chunkInit(...)).
+    assert.ok(!state.evals.some((c) => c.includes('__wae.chunkInit(')), 'did not fall back to the __wae chunk loop');
+    page.close();
+  } finally { server.close(); }
+});
+
+test('readBig falls back to the __wae chunk loop on a host without eval_big', async () => {
+  const onEval = (code) => {
+    if (code.includes('__wae.chunkInit')) return 5;
+    if (code.includes('__wae.chunkAt')) return 'HELLO';
+    return 'ok';
+  };
+  const { server, port, state } = await startMock({
+    onEval,
+    hello: { ops: ['hello', 'ping', 'auth', 'eval', 'bounds', 'shot', 'layerdebug', 'layertree', 'sink_replay'] }, // no eval_big
+  });
+  try {
+    const page = await openPage(port);
+    const out = await page.readBig('window.x');
+    assert.equal(out, 'HELLO');
+    assert.ok(state.evals.some((c) => c.includes('__wae.chunkInit')), 'used the client-side chunk fallback');
     page.close();
   } finally { server.close(); }
 });
