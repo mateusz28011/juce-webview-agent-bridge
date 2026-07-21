@@ -24,7 +24,9 @@
 #include <juce_core/juce_core.h>
 #include <juce_events/juce_events.h>
 
+#include <atomic>
 #include <cstring>
+#include <thread>
 
 #if ! JUCE_WINDOWS
  #include <sys/stat.h> // verify the discovery file is written 0600
@@ -82,6 +84,39 @@ juce::var recvReply (juce::StreamingSocket& s, int timeoutMs)
         }
     }
     return {};
+}
+
+// Like recvReply, but for a reply larger than the socket send buffer: the bridge
+// writes on the message thread, so if we both pump the loop AND read on this thread,
+// a full send buffer deadlocks (writer blocked, reader not draining). Read on a
+// separate thread while the main thread pumps — mirrors a real client (reader thread
+// separate from the host's message thread).
+juce::var recvBigReply (juce::StreamingSocket& s, int timeoutMs)
+{
+    std::atomic<bool> got { false };
+    juce::String      acc;                       // touched only by the reader thread
+    std::thread reader ([&s, &got, &acc]()
+    {
+        while (! got.load())
+        {
+            if (s.waitUntilReady (true, 20) > 0)
+            {
+                char      buf[16384];
+                const int n = s.read (buf, sizeof (buf), false);
+                if (n > 0) { acc += juce::String::fromUTF8 (buf, n); if (acc.containsChar ('\n')) { got.store (true); break; } }
+                else if (n < 0) break;
+            }
+        }
+    });
+
+    const auto start = juce::Time::getMillisecondCounter();
+    while (! got.load() && juce::Time::getMillisecondCounter() - start < (juce::uint32) timeoutMs)
+        pumpMessages (5);
+
+    got.store (true); // release the reader on timeout
+    reader.join();
+    const int nl = acc.indexOfChar ('\n');
+    return nl >= 0 ? juce::JSON::parse (acc.substring (0, nl)) : juce::var();
 }
 
 juce::String tokenOf (const juce::File& disc)
@@ -253,6 +288,49 @@ TEST_CASE ("WebAgentBridge eval returns the evaluator result and surfaces its er
     const auto badErr = bad.getProperty ("error", juce::var());
     REQUIRE (badErr.getProperty ("code", juce::var()).toString() == "EVAL_ERROR");
     REQUIRE (badErr.getProperty ("message", juce::var()).toString() == "kaboom");
+
+    bridge.stop();
+}
+
+TEST_CASE ("WebAgentBridge eval_big reassembles a large result in one request",
+           "[web_agent][bridge]")
+{
+    auto disc = tempDisc ("wab_disc_evalbig.json");
+    WebAgentBridge bridge;
+    const int port = bridge.start (19111, disc);
+    REQUIRE (port != 0);
+
+    // Fake evaluator implementing the host/page chunk protocol against a 150 KB string
+    // (well past the ~100KB WKWebView single-return stall this op exists to dodge).
+    auto big       = std::make_shared<juce::String> (juce::String::repeatedString ("X", 150000));
+    auto callCount = std::make_shared<int> (0);
+    bridge.setEvalFunction ([big, callCount] (const juce::String& code, WebAgentBridge::EvalCallback cb)
+    {
+        ++(*callCount);
+        if (code.contains ("window.__webAgentBig="))               // init: store + return length
+            cb (true, juce::var (big->length()), {});
+        else if (code.startsWith ("window.__webAgentBig.substr(")) // chunk read
+        {
+            const auto inside = code.fromFirstOccurrenceOf ("(", false, false)
+                                    .upToLastOccurrenceOf (")", false, false);
+            const int off = inside.upToFirstOccurrenceOf (",", false, false).getIntValue();
+            const int n   = inside.fromFirstOccurrenceOf (",", false, false).getIntValue();
+            cb (true, juce::var (big->substring (off, off + n)), {});
+        }
+        else
+            cb (true, juce::var ("?"), {});
+    });
+
+    auto c = authedClient (port, tokenOf (disc));
+    REQUIRE (sendLine (*c, R"({"id":80,"op":"eval_big","code":"window.bigState"})"));
+    const auto r = recvBigReply (*c, 5000);
+
+    REQUIRE ((bool) r.getProperty ("ok", false));
+    REQUIRE ((int) r.getProperty ("id", -1) == 80);
+    const auto result = r.getProperty ("result", juce::var()).toString();
+    REQUIRE (result.length() == 150000);
+    REQUIRE (result == *big);
+    REQUIRE (*callCount >= 3); // 1 init + >=2 chunk reads (150000 / 60000)
 
     bridge.stop();
 }

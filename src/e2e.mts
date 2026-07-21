@@ -589,6 +589,14 @@ export class Page {
       evaluateJavascript stalls on large (>~100KB) returns, so big values are
       pulled in pieces. `expr` must evaluate to (or stringify to) a string. */
   async readBig(expr: string, { chunk = 32000, timeoutMs }: { chunk?: number; timeoutMs?: number } = {}): Promise<string> {
+    // Native path: the host assembles the whole value in one request (it does the
+    // chunked read internally), so this is one socket round-trip instead of N. Falls
+    // back to the client-side __wae chunk loop on hosts that predate the eval_big op.
+    if (this.caps?.ops.includes('eval_big')) {
+      const r = await this.session.request({ op: 'eval_big', code: expr }, { timeoutMs });
+      if (!r.ok) throw new BridgeOpError(r.error, 'eval_big failed');
+      return r.result;
+    }
     const len = await this.session.evalRaw<number>(`window.__wae.chunkInit(${expr})`, { timeoutMs });
     let out = '';
     for (let off = 0; off < len; off += chunk)

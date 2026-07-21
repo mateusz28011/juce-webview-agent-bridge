@@ -186,7 +186,7 @@ On `start()` the host binds `127.0.0.1:8930` (scanning upward on collision) and
 publishes `{port, token}` to `~/.web_agent_bridge.json` (plus a per-instance file
 under `~/.web_agent_bridge.d/` so several hosts coexist). Clients read it
 automatically; a random per-session **token** gates every connection. The wire is
-newline-delimited JSON over TCP (`hello` / `ping` / `auth` / `eval` / `bounds` /
+newline-delimited JSON over TCP (`hello` / `ping` / `auth` / `eval` / `eval_big` / `bounds` /
 `shot` / `shot_stream` / `layerdebug` / `layertree` / `sink_replay` + the unsolicited `sink` event stream) — the full op table,
 sink-frame format, and discovery details are in [docs/protocol.md](docs/protocol.md).
 
