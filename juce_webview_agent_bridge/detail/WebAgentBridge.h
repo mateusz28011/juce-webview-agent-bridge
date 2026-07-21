@@ -101,6 +101,18 @@ public:
         Called from the registered native sink function (message thread). */
     void pushSink (const juce::var& event);
 
+    /** Cap simultaneously-connected clients (default 16; 0 = unlimited). One
+        blocking read thread runs per client, so this bounds a local process from
+        exhausting threads by opening many connections. Beyond the cap, a new
+        connection is accepted and immediately closed. */
+    void setMaxConnections (int maxConnections);
+
+    /** Tune the sink buffers: `queueMax` is the pending-broadcast backlog before the
+        oldest events are dropped (default 4096, floored at 1); `historyMax` is how
+        many recent frames `sink_replay` can resend (default 1024, 0 disables replay).
+        Take effect immediately. */
+    void setSinkLimits (int queueMax, int historyMax);
+
 private:
     struct Impl;
     std::shared_ptr<Impl> impl;

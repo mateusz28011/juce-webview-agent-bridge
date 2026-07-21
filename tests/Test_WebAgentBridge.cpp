@@ -613,6 +613,69 @@ TEST_CASE ("WebAgentBridge survives writing to a client that vanished mid-stream
     bridge.stop();
 }
 
+TEST_CASE ("WebAgentBridge caps the number of simultaneous connections", "[web_agent][bridge]")
+{
+    auto disc = tempDisc ("wab_disc_cap.json");
+    WebAgentBridge bridge;
+    bridge.setMaxConnections (2);
+    const int port = bridge.start (19081, disc);
+    REQUIRE (port != 0);
+    const auto token = tokenOf (disc);
+
+    // Two authenticated clients fill the cap (authedClient round-trips, so both are
+    // registered before the third connects).
+    auto c1 = authedClient (port, token);
+    auto c2 = authedClient (port, token);
+
+    // The third is accepted at the TCP layer but immediately closed by the cap.
+    juce::StreamingSocket c3;
+    REQUIRE (c3.connect ("127.0.0.1", port, 1000));
+    REQUIRE (c3.waitUntilReady (true, 1000) == 1); // peer close makes it read-ready
+    char buf[16];
+    REQUIRE (c3.read (buf, sizeof (buf), false) <= 0); // EOF: closed by the cap
+
+    // The two accepted clients keep working.
+    REQUIRE (sendLine (*c1, R"({"id":1,"op":"ping"})"));
+    REQUIRE ((bool) recvReply (*c1, 2000).getProperty ("ok", false));
+
+    bridge.stop();
+}
+
+TEST_CASE ("WebAgentBridge honours a configured sink history limit", "[web_agent][bridge]")
+{
+    auto disc = tempDisc ("wab_disc_hist.json");
+    WebAgentBridge bridge;
+    bridge.setSinkLimits (4096, 2); // keep only the 2 most recent frames for replay
+    const int port = bridge.start (19091, disc);
+    REQUIRE (port != 0);
+
+    for (int i = 0; i < 5; ++i)
+    {
+        juce::DynamicObject::Ptr e (new juce::DynamicObject());
+        e->setProperty ("kind", "console");
+        e->setProperty ("n", i);
+        bridge.pushSink (juce::var (e.get()));
+    }
+
+    auto c = authedClient (port, tokenOf (disc));
+    REQUIRE (sendLine (*c, R"({"id":60,"op":"sink_replay","since":0})"));
+    const auto lines = recvLines (*c, 3, 2000); // 2 sink frames (seq 4,5) + the ack
+    int count = -1;
+    std::vector<int> seqs;
+    for (const auto& v : lines)
+    {
+        const auto op2 = v.getProperty ("op", juce::var()).toString();
+        if (op2 == "sink")             seqs.push_back ((int) v.getProperty ("seq", -1));
+        else if (op2 == "sink_replay") count = (int) v.getProperty ("count", -1);
+    }
+    REQUIRE (count == 2); // only the 2 most recent survived the history cap
+    REQUIRE (seqs.size() == 2);
+    REQUIRE (seqs[0] == 4);
+    REQUIRE (seqs[1] == 5);
+
+    bridge.stop();
+}
+
 TEST_CASE ("WebAgentBridge fails CLOSED (refuses to start) when it cannot publish the token",
            "[web_agent][bridge]")
 {

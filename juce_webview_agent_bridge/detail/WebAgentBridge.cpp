@@ -217,6 +217,12 @@ struct WebAgentBridge::Impl : public std::enable_shared_from_this<WebAgentBridge
     std::deque<std::pair<std::uint64_t, juce::String>>  sinkHistory;
     std::mutex                                          historyMutex;
 
+    // Tunable limits (public setters take effect immediately). maxConnections is a
+    // DoS guard on the accept loop (0 = unlimited); the sink caps bound memory.
+    std::atomic<int>    maxConnections { 16 };
+    std::atomic<size_t> sinkQueueMax   { kSinkQueueMax };
+    std::atomic<size_t> sinkHistoryMax { kSinkHistoryMax };
+
     //==========================================================================
     void broadcast (const juce::String& line)
     {
@@ -234,7 +240,7 @@ struct WebAgentBridge::Impl : public std::enable_shared_from_this<WebAgentBridge
     {
         std::lock_guard<std::mutex> lk (historyMutex);
         sinkHistory.emplace_back (seq, line);
-        while (sinkHistory.size() > kSinkHistoryMax)
+        while (sinkHistory.size() > sinkHistoryMax.load())
             sinkHistory.pop_front();
     }
 
@@ -242,7 +248,7 @@ struct WebAgentBridge::Impl : public std::enable_shared_from_this<WebAgentBridge
     {
         {
             std::lock_guard<std::mutex> lk (sinkMutex);
-            if (sinkQueue.size() >= kSinkQueueMax)
+            if (sinkQueue.size() >= sinkQueueMax.load())
             {
                 sinkQueue.pop_front(); // bounded backpressure: drop oldest
                 if (++droppedSinks % 256 == 1)
@@ -624,6 +630,21 @@ struct WebAgentBridge::Impl : public std::enable_shared_from_this<WebAgentBridge
             }
             if (! running.load()) { delete raw; break; }
 
+            // Connection cap (DoS guard): one blocking read thread runs per client,
+            // so refuse new ones past the cap by accepting-then-closing. pruneDead()
+            // above keeps the count to live connections.
+            if (const int maxc = maxConnections.load(); maxc > 0)
+            {
+                size_t live;
+                { std::lock_guard<std::mutex> lk (connMutex); live = connections.size(); }
+                if ((int) live >= maxc)
+                {
+                    DBG ("[web_agent] connection cap reached (" << maxc << "); rejecting new client");
+                    delete raw; // closes the socket; the client sees a clean disconnect
+                    continue;
+                }
+            }
+
             configureAcceptedSocket (*raw); // SO_NOSIGPIPE (Apple/BSD): a mid-write disconnect must not kill the host
             auto conn = std::make_shared<Connection> (std::unique_ptr<juce::StreamingSocket> (raw));
             conn->authed.store (token.isEmpty()); // no token => open
@@ -817,6 +838,17 @@ void WebAgentBridge::setScreenshotFunction (ScreenshotFn fn)
 {
     std::lock_guard<std::mutex> lk (impl->fnMutex);
     impl->screenshotFn = std::move (fn);
+}
+
+void WebAgentBridge::setMaxConnections (int maxConnections)
+{
+    impl->maxConnections.store (juce::jmax (0, maxConnections));
+}
+
+void WebAgentBridge::setSinkLimits (int queueMax, int historyMax)
+{
+    impl->sinkQueueMax.store   ((size_t) juce::jmax (1, queueMax)); // a 0 queue would spin; floor at 1
+    impl->sinkHistoryMax.store ((size_t) juce::jmax (0, historyMax));
 }
 
 void WebAgentBridge::pushSink (const juce::var& event)

@@ -5,6 +5,14 @@ commit comparisons are available from the linked GitHub Releases.
 
 ## [Unreleased]
 
+### Added
+
+- `setMaxConnections()` caps simultaneously-connected clients (default 16; one
+  blocking read thread runs per client), so a local process can no longer exhaust
+  host threads by opening many connections — beyond the cap a connection is
+  accepted and immediately closed. `setSinkLimits()` makes the sink broadcast
+  queue and `sink_replay` history bounds tunable instead of compile-time constants.
+
 ### Changed
 
 - **Breaking (protocol 2):** op-reply errors are now a structured object,
