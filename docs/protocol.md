@@ -87,10 +87,14 @@ A host too old to answer `hello` reports no capabilities at all. Treat that as
 
 ## Sink stream
 
-Unsolicited stream events: `{"op":"sink","seq":N,"event":{kind:"console"|"error"|"net", t, data}}`.
+Unsolicited stream events: `{"op":"sink","seq":N,"event":{kind:"console"|"error"|"net"|"navigation", t, data}}`.
 `seq` is a monotonic per-host counter — clients dedup by it and detect gaps; a freshly
 connected client can `sink_replay` (since a seq) to catch up on the **same** socket
 instead of racing a page-backlog read against opening the stream.
+A `navigation` event (`data: {url, title}`) fires whenever the page (re)loads — the
+capture script re-injects at document-start and announces it — so a client can tell
+that its injected state (recorders, hooks, page globals) was wiped instead of the
+reload passing silently. Fires on the first load too.
 For `net`, `data.kind` is one of `fetch` / `xhr` / `ws` / `sse` / `beacon` / `timing`;
 request/response bodies + headers (and WS/SSE frame bodies) are only included while
 response-body capture is armed (`capture on`). Sink events are broadcast from a

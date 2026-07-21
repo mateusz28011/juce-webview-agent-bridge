@@ -597,9 +597,11 @@ export class Page {
     // script (withCapture), so a freshly-connected client only sees events from
     // *now on* — set up a wait BEFORE the action that triggers it, Playwright-style:
     //   const [resp] = await Promise.all([page.waitForResponse('/api/save'), button.click()]);
-    /** Subscribe to live page events. kind: 'console' | 'error' | 'net' | '*'.
+    /** Subscribe to live page events. kind: 'console' | 'error' | 'net' | 'navigation' | '*'.
         The handler receives the raw sink event { kind, t, data }. Returns an
-        unsubscribe fn. (data shapes mirror the CLI `logs` output.) */
+        unsubscribe fn. (data shapes mirror the CLI `logs` output.) A 'navigation'
+        event fires whenever the page (re)loads — the capture script re-injects and
+        announces it — so a client can tell that its injected state was wiped. */
     on(kind, handler) {
         return this.session.onSink((ev) => { if (kind === '*' || ev.kind === kind) {
             try {

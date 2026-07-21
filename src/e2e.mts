@@ -638,16 +638,18 @@ export class Page {
   // *now on* — set up a wait BEFORE the action that triggers it, Playwright-style:
   //   const [resp] = await Promise.all([page.waitForResponse('/api/save'), button.click()]);
 
-  /** Subscribe to live page events. kind: 'console' | 'error' | 'net' | '*'.
+  /** Subscribe to live page events. kind: 'console' | 'error' | 'net' | 'navigation' | '*'.
       The handler receives the raw sink event { kind, t, data }. Returns an
-      unsubscribe fn. (data shapes mirror the CLI `logs` output.) */
-  on<T = unknown>(kind: 'console' | 'error' | 'net' | '*', handler: (event: SinkEvent<T>) => void): () => void {
+      unsubscribe fn. (data shapes mirror the CLI `logs` output.) A 'navigation'
+      event fires whenever the page (re)loads — the capture script re-injects and
+      announces it — so a client can tell that its injected state was wiped. */
+  on<T = unknown>(kind: 'console' | 'error' | 'net' | 'navigation' | '*', handler: (event: SinkEvent<T>) => void): () => void {
     return this.session.onSink((ev) => { if (kind === '*' || ev.kind === kind) { try { handler(ev); } catch {} } });
   }
 
   /** Resolve with the first sink event of `kind` (optionally matching predicate),
       or reject on timeout. predicate receives the raw event { kind, t, data }. */
-  waitForEvent<T = unknown>(kind: 'console' | 'error' | 'net' | '*', predicate?: ((event: SinkEvent<T>) => boolean) | TimeoutOptions, { timeout }: TimeoutOptions = {}): Promise<SinkEvent<T>> {
+  waitForEvent<T = unknown>(kind: 'console' | 'error' | 'net' | 'navigation' | '*', predicate?: ((event: SinkEvent<T>) => boolean) | TimeoutOptions, { timeout }: TimeoutOptions = {}): Promise<SinkEvent<T>> {
     if (typeof predicate === 'object' && predicate !== null) { timeout = predicate.timeout; predicate = undefined; }
     const ms = timeout ?? this.defaultTimeout;
     this.log(`waitForEvent ${kind}`);

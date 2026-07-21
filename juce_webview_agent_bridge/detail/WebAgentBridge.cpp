@@ -912,8 +912,9 @@ withCapture (juce::WebBrowserComponent::Options options, std::weak_ptr<WebAgentB
     hooks->setProperty ("fetch",   captureOptions.fetch);
     hooks->setProperty ("xhr",     captureOptions.xhr);
     hooks->setProperty ("ws",      captureOptions.webSocket);
-    hooks->setProperty ("sse",     captureOptions.eventSource);
-    hooks->setProperty ("beacon",  captureOptions.beacon);
+    hooks->setProperty ("sse",        captureOptions.eventSource);
+    hooks->setProperty ("beacon",     captureOptions.beacon);
+    hooks->setProperty ("navigation", captureOptions.navigation);
     const auto prelude = "window.__webAgentCaptureHooks = "
                        + juce::JSON::toString (juce::var (hooks.get()), true) + ";\n";
 

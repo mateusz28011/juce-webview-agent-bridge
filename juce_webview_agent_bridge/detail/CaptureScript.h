@@ -268,6 +268,17 @@ inline const char* kCaptureScript = R"WEBAGENTJS(
     }
   } catch (e) {}
 
+  // --- navigation / reload signal: this script re-injects at document-start on every
+  //     committed navigation, so emitting here tells a client the page (re)loaded and
+  //     any state it injected was wiped — the failure that otherwise looks like nothing
+  //     happened. window.location/document guarded so it stays safe in odd contexts. ---
+  if (hookOn('navigation')) try {
+    send('navigation', {
+      url: clip((window.location && location.href) || ''),
+      title: clip((window.document && document.title) || '')
+    });
+  } catch (e) {}
+
   send('console', { level: 'info', args: ['[web_agent] capture installed'] });
 })();
 )WEBAGENTJS";

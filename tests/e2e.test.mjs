@@ -580,6 +580,18 @@ test('waitForEvent matches an error event by predicate', async () => {
   } finally { server.close(); }
 });
 
+test('waitForEvent resolves on a navigation (reload) event', async () => {
+  const { server, port, pushSink } = await startMock({ onEval: () => 'ok' });
+  try {
+    const page = await openPage(port);
+    const pending = page.waitForEvent('navigation', { timeout: 1000 });
+    pushSink({ kind: 'navigation', t: 1, data: { url: 'https://app.test/next', title: 'Next' } });
+    const ev = await pending;
+    assert.equal(ev.data.url, 'https://app.test/next');
+    page.close();
+  } finally { server.close(); }
+});
+
 test('waitForFunction polls a page expression until it is truthy', async () => {
   let n = 0;
   const onEval = (code) => {

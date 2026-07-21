@@ -140,6 +140,7 @@ struct CaptureOptions
     bool webSocket   = true;  // WebSocket
     bool eventSource = true;  // EventSource / SSE
     bool beacon      = true;  // navigator.sendBeacon
+    bool navigation  = true;  // emit a `navigation` sink event on every page (re)load
 };
 
 /** Folds the capture layer into a WebBrowserComponent::Options:

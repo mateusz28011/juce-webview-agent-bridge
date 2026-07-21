@@ -7,6 +7,11 @@ commit comparisons are available from the linked GitHub Releases.
 
 ### Added
 
+- The sink stream now emits a `navigation` event (`data: {url, title}`) on every
+  page (re)load, so a client can detect that a reload wiped its injected state
+  (recorders, hooks, page globals) instead of the reload passing silently — the
+  failure that otherwise looks exactly like "nothing happened". Consume it with
+  `page.on('navigation')` / `page.waitForEvent('navigation')`, or the `logs` stream.
 - `withCapture()` now takes a `CaptureOptions` argument selecting which page hooks
   the injected script installs — console, errors, resource timing, fetch, XHR,
   WebSocket, EventSource, and sendBeacon (all on by default) — so a host page whose
