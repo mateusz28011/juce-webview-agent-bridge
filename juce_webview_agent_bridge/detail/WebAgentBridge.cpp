@@ -28,6 +28,8 @@
  #include <sys/socket.h> // ::send()/MSG_NOSIGNAL/SO_NOSIGPIPE — keep SIGPIPE from killing the host
  #include <sys/stat.h>   // chmod() — 0600 on the plaintext-token discovery file
  #include <unistd.h>     // getpid() — process id in the discovery record
+#else
+ #include <process.h>    // _getpid() — process id in the discovery record (no <windows.h> needed)
 #endif
 
 namespace web_agent
@@ -156,7 +158,7 @@ bool writeAll (juce::StreamingSocket& socket, const char* data, size_t len)
 int currentProcessId()
 {
    #if JUCE_WINDOWS
-    return (int) ::GetCurrentProcessId();
+    return (int) ::_getpid();
    #else
     return (int) ::getpid();
    #endif
