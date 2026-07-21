@@ -16,8 +16,111 @@
 
 #import <AppKit/AppKit.h>
 #import <CoreGraphics/CoreGraphics.h>
+#import <CoreImage/CoreImage.h>
+#import <CoreMedia/CoreMedia.h>
 #import <ImageIO/ImageIO.h>
 #import <ScreenCaptureKit/ScreenCaptureKit.h>
+
+// SCStreamOutput delegate for shot_stream: writes each captured frame to a PNG and
+// notifies via a C++ callback. Obj-C classes must live at global scope (not inside a
+// C++ namespace); the C++ entry point below is in web_agent::detail. This file is
+// compiled in the module build, so it is syntax/type-checked on macOS CI, but the
+// live capture path can only be verified on a real macOS window.
+API_AVAILABLE(macos(14.0))
+@interface WABStreamOutput : NSObject <SCStreamOutput, SCStreamDelegate>
+- (instancetype) initWithDir: (juce::File) dir
+                      cropPx: (juce::Rectangle<int>) cropPx
+                     onFrame: (std::function<void (juce::String, double, int, int)>) onFrame;
+- (int) frameCount;
+@end
+
+@implementation WABStreamOutput
+{
+    std::function<void (juce::String, double, int, int)> _onFrame;
+    juce::File           _dir;
+    juce::Rectangle<int> _cropPx;   // device-px crop; empty = whole frame
+    std::atomic<int>     _count;
+    CFAbsoluteTime       _t0;
+    CIContext*           _ci;
+}
+
+- (instancetype) initWithDir: (juce::File) dir
+                      cropPx: (juce::Rectangle<int>) cropPx
+                     onFrame: (std::function<void (juce::String, double, int, int)>) onFrame
+{
+    if (self = [super init])
+    {
+        _dir = dir;
+        _cropPx = cropPx;
+        _onFrame = std::move (onFrame);
+        _count.store (0);
+        _t0 = CFAbsoluteTimeGetCurrent();
+        _ci = [[CIContext alloc] init];
+    }
+    return self;
+}
+
+- (void) dealloc { [_ci release]; [super dealloc]; }
+
+- (int) frameCount { return _count.load(); }
+
+- (void) stream: (SCStream*) stream
+    didOutputSampleBuffer: (CMSampleBufferRef) sampleBuffer
+                   ofType: (SCStreamOutputType) type
+{
+    juce::ignoreUnused (stream);
+    if (type != SCStreamOutputTypeScreen || ! CMSampleBufferIsValid (sampleBuffer))
+        return;
+
+    CVImageBufferRef pixels = CMSampleBufferGetImageBuffer (sampleBuffer);
+    if (pixels == nullptr)
+        return;
+
+    CIImage* ciImage = [CIImage imageWithCVPixelBuffer: pixels];
+    if (ciImage == nil)
+        return;
+
+    CGImageRef full = [_ci createCGImage: ciImage fromRect: [ciImage extent]];
+    if (full == nullptr)
+        return;
+
+    CGImageRef toWrite = full;
+    CGImageRef cropped = nullptr;
+    if (! _cropPx.isEmpty())
+    {
+        cropped = CGImageCreateWithImageInRect (full, CGRectMake (_cropPx.getX(), _cropPx.getY(),
+                                                                  _cropPx.getWidth(), _cropPx.getHeight()));
+        if (cropped != nullptr)
+            toWrite = cropped;
+    }
+
+    const int      idx = _count.fetch_add (1);
+    const juce::File f  = _dir.getChildFile ("frame-" + juce::String (idx).paddedLeft ('0', 6) + ".png");
+    NSString*      path = [NSString stringWithUTF8String: f.getFullPathName().toRawUTF8()];
+
+    bool ok = false;
+    if (path != nil)
+    {
+        NSURL* url = [NSURL fileURLWithPath: path];
+        CGImageDestinationRef dest = CGImageDestinationCreateWithURL ((__bridge CFURLRef) url,
+                                                                      (CFStringRef) @"public.png", 1, nullptr);
+        if (dest != nullptr)
+        {
+            CGImageDestinationAddImage (dest, toWrite, nullptr);
+            ok = CGImageDestinationFinalize (dest);
+            CFRelease (dest);
+        }
+    }
+
+    const int w = (int) CGImageGetWidth  (toWrite);
+    const int h = (int) CGImageGetHeight (toWrite);
+    if (cropped != nullptr) CGImageRelease (cropped);
+    CGImageRelease (full);
+
+    if (ok)
+        _onFrame (f.getFullPathName(), CFAbsoluteTimeGetCurrent() - _t0, w, h);
+}
+@end
 
 namespace web_agent::detail
 {
@@ -153,6 +256,106 @@ void captureWindowAsync (juce::Component& comp,
     else
     {
         done (false, out, "ScreenCaptureKit screenshot requires macOS 14+");
+    }
+}
+
+void captureStreamAsync (juce::Component& comp,
+                         juce::File dir,
+                         int fps,
+                         int durationMs,
+                         juce::Rectangle<int> viewportCrop,
+                         std::function<void (juce::String, double, int, int)> onFrame,
+                         std::function<void (bool, int, juce::String)> onDone)
+{
+    auto* top  = comp.getTopLevelComponent();
+    auto* peer = (top != nullptr ? top : &comp)->getPeer();
+    if (peer == nullptr) { onDone (false, 0, "no native peer"); return; }
+
+    NSView*   view = (NSView*) peer->getNativeHandle();
+    NSWindow* win  = [view window];
+    if (win == nil) { onDone (false, 0, "no native window"); return; }
+
+    dir.createDirectory();
+
+    const CGWindowID targetID    = (CGWindowID) [win windowNumber];
+    const CGFloat    scale       = [win backingScaleFactor];
+    const NSRect     frameRect   = [win frame];
+    const NSRect     contentRect = [win contentRectForFrameRect: frameRect];
+    const double     titleBarPts = frameRect.size.height - contentRect.size.height;
+    const juce::Rectangle<int> compInTop = (top != nullptr ? top : &comp)->getLocalArea (&comp, comp.getLocalBounds());
+    const juce::Rectangle<int> cropReq   = viewportCrop;
+    const int fpsClamped = juce::jlimit (1, 120, fps);
+
+    if (@available (macOS 14.0, *))
+    {
+        [SCShareableContent
+            getShareableContentExcludingDesktopWindows: NO
+                              onScreenWindowsOnly: YES
+                                completionHandler: ^(SCShareableContent* content, NSError* error)
+        {
+            if (error != nil || content == nil) { onDone (false, 0, "SCShareableContent failed"); return; }
+
+            SCWindow* match = nil;
+            for (SCWindow* w in content.windows)
+                if (w.windowID == targetID) { match = w; break; }
+            if (match == nil) { onDone (false, 0, "window not found (Screen Recording permission?)"); return; }
+
+            const size_t imgW = (size_t) (match.frame.size.width  * scale);
+            const size_t imgH = (size_t) (match.frame.size.height * scale);
+
+            // The stream config fixes the frame size, so the device-px crop is the
+            // same for every frame — compute it once (full window incl. title bar).
+            juce::Rectangle<int> cropPx;
+            if (! cropReq.isEmpty())
+            {
+                const juce::Rectangle<float> compInImg ((float) compInTop.getX(),
+                                                        (float) compInTop.getY() + (float) titleBarPts,
+                                                        (float) compInTop.getWidth(),
+                                                        (float) compInTop.getHeight());
+                cropPx = computeCropPx ({ 0, 0, (int) imgW, (int) imgH }, compInImg, cropReq, (double) scale);
+            }
+
+            SCContentFilter*       filter = [[SCContentFilter alloc] initWithDesktopIndependentWindow: match];
+            SCStreamConfiguration* cfg    = [[SCStreamConfiguration alloc] init];
+            cfg.width                = imgW;
+            cfg.height               = imgH;
+            cfg.showsCursor          = NO;
+            cfg.minimumFrameInterval = CMTimeMake (1, (int32_t) fpsClamped);
+            cfg.pixelFormat          = kCVPixelFormatType_32BGRA;
+            cfg.queueDepth           = 6;
+
+            WABStreamOutput* output = [[WABStreamOutput alloc] initWithDir: dir cropPx: cropPx onFrame: onFrame];
+            SCStream*        stream = [[SCStream alloc] initWithFilter: filter configuration: cfg delegate: output];
+
+            [filter release];
+            [cfg release];
+
+            dispatch_queue_t frameQ = dispatch_queue_create ("web_agent.shot_stream", DISPATCH_QUEUE_SERIAL);
+            NSError* addErr = nil;
+            [stream addStreamOutput: output type: SCStreamOutputTypeScreen sampleHandlerQueue: frameQ error: &addErr];
+            if (addErr != nil) { [stream release]; [output release]; onDone (false, 0, "addStreamOutput failed"); return; }
+
+            [stream startCaptureWithCompletionHandler: ^(NSError* startErr)
+            {
+                if (startErr != nil) { [stream release]; [output release]; onDone (false, 0, "startCapture failed"); return; }
+
+                // Run for durationMs, then stop and report how many frames landed.
+                dispatch_after (dispatch_time (DISPATCH_TIME_NOW, (int64_t) durationMs * (int64_t) NSEC_PER_MSEC),
+                                dispatch_get_main_queue(), ^{
+                    [stream stopCaptureWithCompletionHandler: ^(NSError* stopErr)
+                    {
+                        const int count = [output frameCount];
+                        [stream release];
+                        [output release];
+                        onDone (true, count, stopErr != nil ? juce::String ("stopCapture warning") : juce::String());
+                    }];
+                });
+            }];
+        }];
+    }
+    else
+    {
+        onDone (false, 0, "ScreenCaptureKit streaming requires macOS 14+");
     }
 }
 

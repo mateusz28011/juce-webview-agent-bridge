@@ -114,6 +114,23 @@ void captureWindowAsync (juce::Component& comp,
                          juce::Rectangle<int> viewportCrop,
                          std::function<void (bool ok, juce::File png, juce::String error)> done);
 
+/** Frame-rate capture of the native window hosting `comp` to a directory of PNGs
+    (`<dir>/frame-000000.png`, …) via a persistent capture stream, for `durationMs`
+    at approximately `fps`.
+    @param onFrame  called per written frame (on a capture worker thread) with the
+                    PNG path, its timestamp in seconds from start, and pixel size.
+    @param onDone   called once at the end with ok, the frame count, and an error.
+    `viewportCrop` matches captureWindowAsync. Must be called on the message thread
+    (it reads the native window handle). Only implemented on macOS 14+ so far;
+    other platforms report failure via onDone. */
+void captureStreamAsync (juce::Component& comp,
+                         juce::File dir,
+                         int fps,
+                         int durationMs,
+                         juce::Rectangle<int> viewportCrop,
+                         std::function<void (juce::String pngPath, double tSeconds, int w, int h)> onFrame,
+                         std::function<void (bool ok, int frameCount, juce::String error)> onDone);
+
 } // namespace web_agent::detail
 
 #endif // WEB_AGENT_BRIDGE_ENABLED

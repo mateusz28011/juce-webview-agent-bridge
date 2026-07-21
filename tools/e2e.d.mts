@@ -199,15 +199,16 @@ export declare class Page {
     backend<T = unknown>(name: string, ...params: unknown[]): Promise<T>;
     /** Fire a JUCE native function without awaiting a result (resultId = -1). */
     fireBackend(name: string, ...params: unknown[]): Promise<boolean>;
-    /** Subscribe to live page events. kind: 'console' | 'error' | 'net' | 'navigation' | '*'.
+    /** Subscribe to live page events. kind: 'console' | 'error' | 'net' | 'navigation' | 'frame' | '*'.
         The handler receives the raw sink event { kind, t, data }. Returns an
         unsubscribe fn. (data shapes mirror the CLI `logs` output.) A 'navigation'
         event fires whenever the page (re)loads — the capture script re-injects and
-        announces it — so a client can tell that its injected state was wiped. */
-    on<T = unknown>(kind: 'console' | 'error' | 'net' | 'navigation' | '*', handler: (event: SinkEvent<T>) => void): () => void;
+        announces it — so a client can tell that its injected state was wiped. A
+        'frame' event (`data:{path,w,h}`) fires per captured frame during captureStream(). */
+    on<T = unknown>(kind: 'console' | 'error' | 'net' | 'navigation' | 'frame' | '*', handler: (event: SinkEvent<T>) => void): () => void;
     /** Resolve with the first sink event of `kind` (optionally matching predicate),
         or reject on timeout. predicate receives the raw event { kind, t, data }. */
-    waitForEvent<T = unknown>(kind: 'console' | 'error' | 'net' | 'navigation' | '*', predicate?: ((event: SinkEvent<T>) => boolean) | TimeoutOptions, { timeout }?: TimeoutOptions): Promise<SinkEvent<T>>;
+    waitForEvent<T = unknown>(kind: 'console' | 'error' | 'net' | 'navigation' | 'frame' | '*', predicate?: ((event: SinkEvent<T>) => boolean) | TimeoutOptions, { timeout }?: TimeoutOptions): Promise<SinkEvent<T>>;
     /** Resolve with the network event `data` for the first fetch/XHR whose URL
         contains `urlOrPredicate` (string) or for which predicate(data) is true.
         Mirrors Playwright's page.waitForResponse over the observe-only net stream. */
@@ -271,6 +272,26 @@ export declare class Page {
         path?: string;
         clip?: ClipRect;
     }): Promise<string>;
+    /** Frame-rate capture of the host window to a directory of PNGs via the `shot_stream`
+        op (persistent SCStream; macOS-only for now). Runs for `durationMs` at ~`fps`,
+        writing one PNG per frame. Returns the directory, frame count, and the collected
+        frame descriptors; frames also arrive live as `frame` sink events
+        (`page.on('frame')`). `clip: {x,y,w,h}` (CSS px) crops to a UI region. */
+    captureStream({ fps, durationMs, clip, dir, timeout }?: {
+        fps?: number;
+        durationMs?: number;
+        clip?: ClipRect;
+        dir?: string;
+    } & TimeoutOptions): Promise<{
+        dir: string;
+        count: number;
+        frames: Array<{
+            path: string;
+            t: number;
+            w: number;
+            h: number;
+        }>;
+    }>;
     close(): void;
 }
 export declare class Locator {

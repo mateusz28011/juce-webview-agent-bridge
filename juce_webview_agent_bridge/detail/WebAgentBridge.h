@@ -64,6 +64,15 @@ public:
     using ScreenshotCallback = std::function<void (bool ok, juce::String pngPath, juce::String error)>;
     using ScreenshotFn       = std::function<void (juce::File target, juce::Rectangle<int> viewportCrop, ScreenshotCallback)>;
 
+    // Frame-rate window capture: a persistent stream writes one PNG per frame into a
+    // directory. onFrame fires per frame (may run on a capture worker thread); onDone
+    // fires once at the end. Same viewportCrop semantics as ScreenshotFn.
+    using StreamFrameCallback = std::function<void (juce::String pngPath, double tSeconds, int widthPx, int heightPx)>;
+    using StreamDoneCallback  = std::function<void (bool ok, int frameCount, juce::String error)>;
+    using StreamFn            = std::function<void (juce::File dir, int fps, int durationMs,
+                                                    juce::Rectangle<int> viewportCrop,
+                                                    StreamFrameCallback onFrame, StreamDoneCallback onDone)>;
+
     WebAgentBridge();
     ~WebAgentBridge();
 
@@ -96,6 +105,9 @@ public:
     void setBoundsFunction (BoundsFn fn);
     /** Captures the host window to a PNG (native, includes WebGL). */
     void setScreenshotFunction (ScreenshotFn fn);
+    /** Frame-rate capture of the host window to a directory of PNGs (the `shot_stream`
+        op). Absent = the op reports it is unavailable. */
+    void setStreamFunction (StreamFn fn);
 
     /** Forward a page event (console/network/error) to connected clients.
         Called from the registered native sink function (message thread). */

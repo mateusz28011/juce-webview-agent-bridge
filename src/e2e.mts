@@ -646,18 +646,19 @@ export class Page {
   // *now on* — set up a wait BEFORE the action that triggers it, Playwright-style:
   //   const [resp] = await Promise.all([page.waitForResponse('/api/save'), button.click()]);
 
-  /** Subscribe to live page events. kind: 'console' | 'error' | 'net' | 'navigation' | '*'.
+  /** Subscribe to live page events. kind: 'console' | 'error' | 'net' | 'navigation' | 'frame' | '*'.
       The handler receives the raw sink event { kind, t, data }. Returns an
       unsubscribe fn. (data shapes mirror the CLI `logs` output.) A 'navigation'
       event fires whenever the page (re)loads — the capture script re-injects and
-      announces it — so a client can tell that its injected state was wiped. */
-  on<T = unknown>(kind: 'console' | 'error' | 'net' | 'navigation' | '*', handler: (event: SinkEvent<T>) => void): () => void {
+      announces it — so a client can tell that its injected state was wiped. A
+      'frame' event (`data:{path,w,h}`) fires per captured frame during captureStream(). */
+  on<T = unknown>(kind: 'console' | 'error' | 'net' | 'navigation' | 'frame' | '*', handler: (event: SinkEvent<T>) => void): () => void {
     return this.session.onSink((ev) => { if (kind === '*' || ev.kind === kind) { try { handler(ev); } catch {} } });
   }
 
   /** Resolve with the first sink event of `kind` (optionally matching predicate),
       or reject on timeout. predicate receives the raw event { kind, t, data }. */
-  waitForEvent<T = unknown>(kind: 'console' | 'error' | 'net' | 'navigation' | '*', predicate?: ((event: SinkEvent<T>) => boolean) | TimeoutOptions, { timeout }: TimeoutOptions = {}): Promise<SinkEvent<T>> {
+  waitForEvent<T = unknown>(kind: 'console' | 'error' | 'net' | 'navigation' | 'frame' | '*', predicate?: ((event: SinkEvent<T>) => boolean) | TimeoutOptions, { timeout }: TimeoutOptions = {}): Promise<SinkEvent<T>> {
     if (typeof predicate === 'object' && predicate !== null) { timeout = predicate.timeout; predicate = undefined; }
     const ms = timeout ?? this.defaultTimeout;
     this.log(`waitForEvent ${kind}`);
@@ -824,6 +825,32 @@ export class Page {
       { op: 'shot', ...(path ? { path } : {}), ...(clip ? { rect: clip } : {}) }, { timeoutMs: 30000 });
     if (!r.ok) throw new BridgeOpError(r.error, 'native screenshot failed');
     return r.path;
+  }
+
+  /** Frame-rate capture of the host window to a directory of PNGs via the `shot_stream`
+      op (persistent SCStream; macOS-only for now). Runs for `durationMs` at ~`fps`,
+      writing one PNG per frame. Returns the directory, frame count, and the collected
+      frame descriptors; frames also arrive live as `frame` sink events
+      (`page.on('frame')`). `clip: {x,y,w,h}` (CSS px) crops to a UI region. */
+  async captureStream({ fps, durationMs, clip, dir, timeout }:
+    { fps?: number; durationMs?: number; clip?: ClipRect; dir?: string } & TimeoutOptions = {}):
+    Promise<{ dir: string; count: number; frames: Array<{ path: string; t: number; w: number; h: number }> }> {
+    requireOp(this.caps, 'shot_stream', 'page.captureStream()');
+    this.log(`captureStream${clip ? ' (region)' : ''} fps=${fps ?? 30} dur=${durationMs ?? 1000}ms`);
+    const frames: Array<{ path: string; t: number; w: number; h: number }> = [];
+    const off = this.on<{ path: string; w: number; h: number }>('frame',
+      (ev) => frames.push({ path: ev.data.path, t: ev.t, w: ev.data.w, h: ev.data.h }));
+    try {
+      const r = await this.session.request(
+        { op: 'shot_stream', ...(dir ? { dir } : {}), ...(fps ? { fps } : {}), ...(durationMs ? { durationMs } : {}), ...(clip ? { rect: clip } : {}) },
+        { timeoutMs: timeout ?? (durationMs ?? 1000) + 30000 });
+      if (!r.ok) throw new BridgeOpError(r.error, 'shot_stream failed');
+      // `frame` events broadcast asynchronously, so a few may still be in flight when
+      // the reply lands — give stragglers a moment to reach the reported count.
+      const deadline = Date.now() + 1000;
+      while (frames.length < r.count && Date.now() < deadline) await new Promise((res) => setTimeout(res, 20));
+      return { dir: r.dir, count: r.count, frames };
+    } finally { off(); }
   }
 
   close() { this.session.close(); }

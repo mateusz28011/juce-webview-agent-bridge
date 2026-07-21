@@ -425,6 +425,82 @@ TEST_CASE ("WebAgentBridge eval without a registered evaluator reports 'no webvi
 
     bridge.stop();
 }
+
+TEST_CASE ("WebAgentBridge shot_stream streams frame events and replies with the count",
+           "[web_agent][bridge]")
+{
+    auto disc = tempDisc ("wab_disc_stream.json");
+    WebAgentBridge bridge;
+    const int port = bridge.start (19121, disc);
+    REQUIRE (port != 0);
+
+    // Fake capturer: deliver 3 synthetic frames, then finish. (Real capture is native
+    // and can't run headless; this exercises the op/sink plumbing.)
+    auto seenDir   = std::make_shared<juce::File>();
+    auto seenFps   = std::make_shared<int> (0);
+    bridge.setStreamFunction ([seenDir, seenFps] (juce::File dir, int fps, int /*durMs*/, juce::Rectangle<int> /*crop*/,
+                                                  WebAgentBridge::StreamFrameCallback onFrame,
+                                                  WebAgentBridge::StreamDoneCallback onDone)
+    {
+        *seenDir = dir;
+        *seenFps = fps;
+        for (int i = 0; i < 3; ++i)
+            onFrame (dir.getChildFile ("frame" + juce::String (i) + ".png").getFullPathName(), i * 0.033, 120, 80);
+        onDone (true, 3, {});
+    });
+
+    auto c = authedClient (port, tokenOf (disc));
+    REQUIRE (sendLine (*c, R"({"id":90,"op":"shot_stream","fps":24,"durationMs":100})"));
+
+    // Expect 3 `frame` sink events plus the shot_stream reply (order: sinks may
+    // interleave, but all four arrive).
+    const auto lines = recvLines (*c, 4, 3000);
+    int frames = 0, replyCount = -1;
+    bool replyOk = false;
+    for (const auto& v : lines)
+    {
+        const auto op2 = v.getProperty ("op", juce::var()).toString();
+        if (op2 == "sink")
+        {
+            const auto ev = v.getProperty ("event", juce::var());
+            if (ev.getProperty ("kind", juce::var()).toString() == "frame")
+            {
+                ++frames;
+                REQUIRE (ev.getProperty ("data", juce::var()).getProperty ("path", juce::var()).toString().endsWith (".png"));
+                REQUIRE ((int) ev.getProperty ("data", juce::var()).getProperty ("w", 0) == 120);
+            }
+        }
+        else if (op2 == "shot_stream")
+        {
+            replyOk    = (bool) v.getProperty ("ok", false);
+            replyCount = (int) v.getProperty ("count", -1);
+        }
+    }
+    REQUIRE (frames == 3);
+    REQUIRE (replyOk);
+    REQUIRE (replyCount == 3);
+    REQUIRE (*seenFps == 24); // request params threaded through to the capturer
+
+    bridge.stop();
+}
+
+TEST_CASE ("WebAgentBridge shot_stream reports unavailable without a stream function",
+           "[web_agent][bridge]")
+{
+    auto disc = tempDisc ("wab_disc_stream_na.json");
+    WebAgentBridge bridge;
+    const int port = bridge.start (19131, disc);
+    REQUIRE (port != 0);
+    // deliberately no setStreamFunction()
+
+    auto c = authedClient (port, tokenOf (disc));
+    REQUIRE (sendLine (*c, R"({"id":91,"op":"shot_stream"})"));
+    const auto r = recvReply (*c, 3000);
+    REQUIRE_FALSE ((bool) r.getProperty ("ok", true));
+    REQUIRE (r.getProperty ("error", juce::var()).getProperty ("code", juce::var()).toString() == "SCREENSHOT_UNAVAILABLE");
+
+    bridge.stop();
+}
 #endif // JUCE_MODAL_LOOPS_PERMITTED
 
 TEST_CASE ("computeCropPx maps a viewport rect to clamped device pixels", "[web_agent][screenshot]")

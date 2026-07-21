@@ -404,6 +404,20 @@ void captureWindowAsync (juce::Component& comp,
     }).detach();
 }
 
+void captureStreamAsync (juce::Component& comp,
+                         juce::File dir,
+                         int fps,
+                         int durationMs,
+                         juce::Rectangle<int> viewportCrop,
+                         std::function<void (juce::String, double, int, int)> onFrame,
+                         std::function<void (bool, int, juce::String)> onDone)
+{
+    // TODO: a persistent Windows.Graphics.Capture frame pool would give frame-rate
+    // capture here; for now the one-shot `shot` op is the Windows capability.
+    juce::ignoreUnused (comp, dir, fps, durationMs, viewportCrop, onFrame);
+    onDone (false, 0, "frame-rate capture is not yet implemented on Windows");
+}
+
 } // namespace web_agent::detail
 
 #endif // WEB_AGENT_BRIDGE_ENABLED && JUCE_WINDOWS

@@ -37,6 +37,7 @@ also carries `token` until the connection is authenticated.
 | `{"id","op":"eval","code":"…"}` | `{"id","op":"eval","ok":bool,"result"?,"error"?}` |
 | `{"id","op":"eval_big","code":"…"}` | `{"id","op":"eval_big","ok",result?,"error"?}` — like `eval` but for large results: the host stringifies the value into a page global and reassembles it from sub-threshold slices, so a >~100KB result doesn't stall WKWebView. One request instead of a client chunk-poll loop. |
 | `{"id","op":"shot","path"?,"rect"?}` | `{"id","op":"shot","ok",path,"error"?}` (PNG written by the host; `rect`={x,y,w,h} CSS px crops to a region) |
+| `{"id","op":"shot_stream","dir"?,"fps"?,"durationMs"?,"rect"?}` | `{"id","op":"shot_stream","ok",dir,count,"error"?}` — frame-rate capture: writes one PNG per frame into `dir` for `durationMs` at ~`fps`, streaming each as a `frame` sink event; the reply carries the final `count`. Persistent SCStream, macOS 14+ only; `rect` crops like `shot`. |
 | `{"id","op":"bounds"}` | `{"id","op":"bounds","ok",x,y,w,h}` (screen coords) |
 | `{"id","op":"ping"}` | `{"id","op":"ping","ok":true}` |
 | `{"id","op":"hello"}` | `{"id","op":"hello","ok",protocolVersion,moduleVersion,ops[],platform,screenshotAvailable,authRequired}` — `moduleVersion` is the host's C++ module version (absent on hosts predating it) |
@@ -88,7 +89,7 @@ A host too old to answer `hello` reports no capabilities at all. Treat that as
 
 ## Sink stream
 
-Unsolicited stream events: `{"op":"sink","seq":N,"event":{kind:"console"|"error"|"net"|"navigation", t, data}}`.
+Unsolicited stream events: `{"op":"sink","seq":N,"event":{kind:"console"|"error"|"net"|"navigation"|"frame", t, data}}`.
 `seq` is a monotonic per-host counter — clients dedup by it and detect gaps; a freshly
 connected client can `sink_replay` (since a seq) to catch up on the **same** socket
 instead of racing a page-backlog read against opening the stream.
@@ -96,6 +97,8 @@ A `navigation` event (`data: {url, title}`) fires whenever the page (re)loads �
 capture script re-injects at document-start and announces it — so a client can tell
 that its injected state (recorders, hooks, page globals) was wiped instead of the
 reload passing silently. Fires on the first load too.
+A `frame` event (`data: {path, w, h}`) fires per captured frame during a `shot_stream`
+run — the PNG path plus its pixel size.
 For `net`, `data.kind` is one of `fetch` / `xhr` / `ws` / `sse` / `beacon` / `timing`;
 request/response bodies + headers (and WS/SSE frame bodies) are only included while
 response-body capture is armed (`capture on`). Sink events are broadcast from a

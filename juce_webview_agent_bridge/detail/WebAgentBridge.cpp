@@ -101,6 +101,16 @@ juce::var makeShotReply (const juce::var& id, bool ok, const juce::String& path,
     return juce::var (r.get());
 }
 
+juce::var makeStreamReply (const juce::var& id, bool ok, const juce::String& dir, int count,
+                           const juce::String& errorCode, const juce::String& errorMessage)
+{
+    auto r = makeReply (id, "shot_stream", ok);
+    if (dir.isNotEmpty()) r->setProperty ("dir", dir);
+    r->setProperty ("count", count);
+    if (errorCode.isNotEmpty() || errorMessage.isNotEmpty()) r->setProperty ("error", makeError (errorCode, errorMessage));
+    return juce::var (r.get());
+}
+
 // SIGPIPE avoidance. juce::StreamingSocket::write() is a single ::send(fd, .., 0):
 // when the peer has closed mid-write it raises SIGPIPE, whose default action kills
 // the whole process (observed: exit 141 when an agent tears the socket down during
@@ -220,6 +230,7 @@ struct WebAgentBridge::Impl : public std::enable_shared_from_this<WebAgentBridge
     EvalFn       evalFn;
     BoundsFn     boundsFn;
     ScreenshotFn screenshotFn;
+    StreamFn     streamFn;
 
     juce::String token;          // session auth token ("" = auth disabled)
     juce::File   discoveryFile;  // {port,token} written here for client auto-discovery (legacy single file)
@@ -286,6 +297,20 @@ struct WebAgentBridge::Impl : public std::enable_shared_from_this<WebAgentBridge
             sinkHistory.pop_front();
     }
 
+    // Envelope a page event as a sink frame (assign seq + op), keep a copy for replay,
+    // and enqueue it for the writer thread. Safe to call from any thread.
+    void pushSinkEvent (const juce::var& event)
+    {
+        const auto seq = ++sinkSeq;
+        juce::DynamicObject::Ptr r (new juce::DynamicObject());
+        r->setProperty ("op", "sink");
+        r->setProperty ("seq", (juce::int64) seq);
+        r->setProperty ("event", event);
+        const auto line = makeLine (juce::var (r.get()));
+        storeHistory (seq, line);
+        enqueueSink (line);
+    }
+
     void enqueueSink (juce::String line)
     {
         {
@@ -347,7 +372,7 @@ struct WebAgentBridge::Impl : public std::enable_shared_from_this<WebAgentBridge
     // advertisement can no longer drift from the dispatch.
     using OpHandler = void (Impl::*) (const std::shared_ptr<Connection>&, const juce::var& id, const juce::var& msg);
     struct OpEntry { const char* name; OpHandler fn; };
-    static const OpEntry kOpTable[10];
+    static const OpEntry kOpTable[11];
 
     // Post-gate auth: the connection is already authenticated (or no token is
     // set), so a stray {"op":"auth"} is simply acknowledged.
@@ -697,6 +722,77 @@ struct WebAgentBridge::Impl : public std::enable_shared_from_this<WebAgentBridge
         });
     }
 
+    // shot_stream: frame-rate window capture. Runs a persistent stream for durationMs
+    // at fps, writing one PNG per frame into `dir`; each frame is announced as a
+    // `frame` sink event (so clients consume them live on the sink stream) and the op
+    // reply carries the final count + dir. Native capture runs on a worker thread, so
+    // onFrame/onDone may fire off the message thread — both pushSink and Connection::
+    // write are safe from any thread.
+    void handleShotStream (const std::shared_ptr<Connection>& conn, const juce::var& id, const juce::var& msg)
+    {
+        const auto dirStr = msg.getProperty ("dir", juce::var()).toString();
+        const int  fps    = juce::jlimit (1, 120,   (int) msg.getProperty ("fps", 30));
+        const int  durMs  = juce::jlimit (1, 60000, (int) msg.getProperty ("durationMs", 1000));
+
+        juce::Rectangle<int> crop;
+        if (const auto rectVar = msg.getProperty ("rect", juce::var()); rectVar.isObject())
+            crop = { (int) rectVar.getProperty ("x", 0), (int) rectVar.getProperty ("y", 0),
+                     (int) rectVar.getProperty ("w", 0), (int) rectVar.getProperty ("h", 0) };
+
+        std::weak_ptr<Impl>       weakSelf = shared_from_this();
+        std::weak_ptr<Connection> weakConn = conn;
+
+        juce::MessageManager::callAsync ([weakSelf, weakConn, id, dirStr, fps, durMs, crop]()
+        {
+            auto self = weakSelf.lock();
+            if (! self || ! self->running.load()) return;
+
+            StreamFn fn;
+            {
+                std::lock_guard<std::mutex> lk (self->fnMutex);
+                fn = self->streamFn;
+            }
+            if (! fn)
+            {
+                if (auto c = weakConn.lock())
+                    c->write (makeLine (makeStreamReply (id, false, {}, 0, "SCREENSHOT_UNAVAILABLE", "stream capture unavailable")));
+                return;
+            }
+
+            const juce::File dir =
+                dirStr.isEmpty()
+                    ? juce::File::getSpecialLocation (juce::File::tempDirectory)
+                          .getChildFile ("web-agent-stream-" + juce::Uuid().toString())
+                    : (juce::File::isAbsolutePath (dirStr)
+                           ? juce::File (dirStr)
+                           : juce::File::getCurrentWorkingDirectory().getChildFile (dirStr));
+            dir.createDirectory();
+
+            auto onFrame = [weakSelf] (juce::String path, double t, int w, int h)
+            {
+                if (auto s = weakSelf.lock())
+                {
+                    juce::DynamicObject::Ptr d (new juce::DynamicObject());
+                    d->setProperty ("path", path);
+                    d->setProperty ("w", w);
+                    d->setProperty ("h", h);
+                    juce::DynamicObject::Ptr ev (new juce::DynamicObject());
+                    ev->setProperty ("kind", "frame");
+                    ev->setProperty ("t", t);
+                    ev->setProperty ("data", juce::var (d.get()));
+                    s->pushSinkEvent (juce::var (ev.get()));
+                }
+            };
+            auto onDone = [weakConn, id, dir] (bool ok, int count, juce::String error)
+            {
+                if (auto c = weakConn.lock())
+                    c->write (makeLine (makeStreamReply (id, ok, dir.getFullPathName(), count,
+                                                         ok ? juce::String() : juce::String ("SCREENSHOT_FAILED"), error)));
+            };
+            fn (dir, fps, durMs, crop, onFrame, onDone);
+        });
+    }
+
     //==========================================================================
     void runReadLoop (std::shared_ptr<Connection> conn)
     {
@@ -778,7 +874,7 @@ struct WebAgentBridge::Impl : public std::enable_shared_from_this<WebAgentBridge
     }
 };
 
-const WebAgentBridge::Impl::OpEntry WebAgentBridge::Impl::kOpTable[10] = {
+const WebAgentBridge::Impl::OpEntry WebAgentBridge::Impl::kOpTable[11] = {
     { "hello",       &Impl::handleHello      },
     { "ping",        &Impl::handlePing       },
     { "auth",        &Impl::handleAuth       },
@@ -786,6 +882,7 @@ const WebAgentBridge::Impl::OpEntry WebAgentBridge::Impl::kOpTable[10] = {
     { "eval_big",    &Impl::handleEvalBig    },
     { "bounds",      &Impl::handleBounds     },
     { "shot",        &Impl::handleShot       },
+    { "shot_stream", &Impl::handleShotStream },
     { "layerdebug",  &Impl::handleLayerDebug },
     { "layertree",   &Impl::handleLayerTree  },
     { "sink_replay", &Impl::handleSinkReplay },
@@ -954,6 +1051,12 @@ void WebAgentBridge::setScreenshotFunction (ScreenshotFn fn)
     impl->screenshotFn = std::move (fn);
 }
 
+void WebAgentBridge::setStreamFunction (StreamFn fn)
+{
+    std::lock_guard<std::mutex> lk (impl->fnMutex);
+    impl->streamFn = std::move (fn);
+}
+
 void WebAgentBridge::setMaxConnections (int maxConnections)
 {
     impl->maxConnections.store (juce::jmax (0, maxConnections));
@@ -972,16 +1075,9 @@ void WebAgentBridge::setInstanceLabel (const juce::String& label)
 
 void WebAgentBridge::pushSink (const juce::var& event)
 {
-    // Called on the message thread — assign a monotonic seq, keep a copy for replay,
-    // then enqueue only; the sink thread does the socket I/O.
-    const auto seq = ++impl->sinkSeq;
-    juce::DynamicObject::Ptr r (new juce::DynamicObject());
-    r->setProperty ("op", "sink");
-    r->setProperty ("seq", (juce::int64) seq);
-    r->setProperty ("event", event);
-    const auto line = makeLine (juce::var (r.get()));
-    impl->storeHistory (seq, line);
-    impl->enqueueSink (line);
+    // Assign a monotonic seq, keep a copy for replay, then enqueue only; the sink
+    // thread does the socket I/O. Safe from any thread (see Impl::pushSinkEvent).
+    impl->pushSinkEvent (event);
 }
 
 //==============================================================================
@@ -1057,6 +1153,16 @@ void connect (WebAgentBridge& bridge, juce::WebBrowserComponent& webView, juce::
             });
         else
             cb (false, {}, "component gone");
+    });
+
+    bridge.setStreamFunction ([bc] (juce::File dir, int fps, int durationMs, juce::Rectangle<int> crop,
+                                    WebAgentBridge::StreamFrameCallback onFrame,
+                                    WebAgentBridge::StreamDoneCallback onDone) mutable
+    {
+        if (auto* c = bc.getComponent())
+            detail::captureStreamAsync (*c, dir, fps, durationMs, crop, std::move (onFrame), std::move (onDone));
+        else
+            onDone (false, 0, "component gone");
     });
 }
 

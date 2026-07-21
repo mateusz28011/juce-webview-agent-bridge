@@ -27,6 +27,18 @@ void captureWindowAsync (juce::Component& comp,
           "is unsupported (Linux XComposite region crop is a TODO)");
 }
 
+void captureStreamAsync (juce::Component& comp,
+                         juce::File dir,
+                         int fps,
+                         int durationMs,
+                         juce::Rectangle<int> viewportCrop,
+                         std::function<void (juce::String, double, int, int)> onFrame,
+                         std::function<void (bool, int, juce::String)> onDone)
+{
+    juce::ignoreUnused (comp, dir, fps, durationMs, viewportCrop, onFrame);
+    onDone (false, 0, "frame-rate capture is not implemented on this platform");
+}
+
 } // namespace web_agent::detail
 
 #endif // WEB_AGENT_BRIDGE_ENABLED
