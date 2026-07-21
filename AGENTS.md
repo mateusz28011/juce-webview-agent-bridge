@@ -114,10 +114,11 @@ Linux.
 
 ### Release notes and verification
 
-- Keep the GitHub Release title exactly `vX.Y.Z`. Its body should mirror the
-  released changelog section in a shorter form and end with the full comparison
-  link. Avoid slogans and generic descriptions such as "typed npm client and
-  automated releases".
+- Keep the GitHub Release title exactly `vX.Y.Z`. `scripts/release.sh` fills the
+  body from the `[X.Y.Z]` `CHANGELOG.md` section (the single source of truth) plus
+  the comparison link — do not hand-write it or fall back to GitHub's raw commit
+  list. Because the changelog IS the body, keep changelog entries free of slogans
+  and generic descriptions such as "typed npm client and automated releases".
 - npm publishing uses Trusted Publishing (OIDC) from the `npm` environment. Do
   not add an `NPM_TOKEN` or `NODE_AUTH_TOKEN` publishing fallback.
 - If GitHub/tag creation succeeds but npm publishing fails, use the workflow's

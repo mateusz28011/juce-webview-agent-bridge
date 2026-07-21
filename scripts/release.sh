@@ -140,7 +140,24 @@ if ! git remote get-url origin >/dev/null 2>&1; then
 fi
 git push --atomic origin main "${tag}"
 if command -v gh >/dev/null 2>&1; then
-  if ! gh release create "${tag}" --generate-notes; then
+  # Release body = this version's curated CHANGELOG section (the single source of
+  # truth) plus the full comparison link — never GitHub's raw commit list, which
+  # for a small release is either spam or (with no PRs) an empty compare link.
+  notes_file="$(mktemp)"
+  awk -v ver="${new}" '
+    $0 ~ ("^## \\[" ver "\\] - ") { grab = 1; next }
+    grab && /^## \[/              { exit }
+    grab                         { print }
+  ' CHANGELOG.md | sed '/./,$!d' > "${notes_file}" # drop leading blank lines
+  repo_url="$(grep -E "^\[${new}\]: " CHANGELOG.md \
+    | sed -E 's#^\[[^]]+\]: (https://github.com/[^ ]+)/releases/tag/.*#\1#')"
+  prev_tag="$(git describe --tags --abbrev=0 "${tag}^" 2>/dev/null || true)"
+  if [[ -s "${notes_file}" && -n "${repo_url}" && -n "${prev_tag}" ]]; then
+    printf '\n**Full changelog**: %s/compare/%s...%s\n' "${repo_url}" "${prev_tag}" "${tag}" >> "${notes_file}"
+  fi
+  if [[ -s "${notes_file}" ]]; then release_notes=(--notes-file "${notes_file}")
+  else                              release_notes=(--generate-notes); fi # fallback: empty section
+  if ! gh release create "${tag}" "${release_notes[@]}"; then
     echo "⚠ Tag was pushed but GitHub Release failed — retry that command, then run: npm publish --access public" >&2
     exit 1
   fi

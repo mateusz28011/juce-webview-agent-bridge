@@ -5,6 +5,13 @@ commit comparisons are available from the linked GitHub Releases.
 
 ## [Unreleased]
 
+### Changed
+
+- GitHub Release notes are now filled automatically from the released
+  `CHANGELOG.md` section (plus the comparison link) instead of GitHub's raw
+  commit list, so the changelog is the single source of truth for release notes
+  and there is no hand-written release body to drift or forget.
+
 ## [0.5.2] - 2026-07-21
 
 ### Fixed

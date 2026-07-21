@@ -93,9 +93,11 @@ git fetch origin --tags && git merge --ff-only origin/main
 git status --short                         # must be clean
 ```
 
-Also open the GitHub Release: the title must be exactly `vX.Y.Z`, and the body
-should mirror the released changelog section in shorter form, ending with the full
-comparison link. Avoid slogans and generic descriptions.
+Also open the GitHub Release: the title must be exactly `vX.Y.Z`. `scripts/release.sh`
+now fills the body automatically from the `[X.Y.Z]` section of `CHANGELOG.md`
+(the single source of truth) plus the full comparison link — no hand-written body,
+no GitHub raw commit list. Just confirm the section rendered as expected. If the
+section was somehow empty, the script falls back to `--generate-notes`.
 
 ## If something fails midway
 
