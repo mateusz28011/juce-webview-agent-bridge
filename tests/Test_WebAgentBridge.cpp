@@ -1507,7 +1507,7 @@ TEST_CASE ("WebAgentBridge delivers concurrently pushed sink frames in seq order
     REQUIRE (port != 0);
     auto c = authedClient (port, tokenOf (disc));
 
-    constexpr int kThreads = 4, kPerThread = 250;
+    static constexpr int kThreads = 4, kPerThread = 250; // static: MSVC won't implicitly capture a local constexpr
     std::vector<std::thread> pushers;
     for (int t = 0; t < kThreads; ++t)
         pushers.emplace_back ([&bridge]
