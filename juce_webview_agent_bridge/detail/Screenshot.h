@@ -29,6 +29,16 @@
 namespace web_agent::detail
 {
 
+/** Converts a device-pixel coordinate to int without overflow: a client-supplied
+    rect can be arbitrarily large (or non-finite), and a float->int cast of an
+    out-of-range value is undefined behaviour. */
+inline int clampPxToInt (double v)
+{
+    if (! std::isfinite (v))
+        return 0;
+    return (int) juce::jlimit (-1.0e9, 1.0e9, v);
+}
+
 /** Pure crop geometry — NO platform calls, so it is unit-testable without a window.
     Given the full captured image size in pixels, the WebView component's rectangle
     WITHIN that image in logical points (top-left origin), an optional viewport
@@ -59,10 +69,10 @@ inline juce::Rectangle<int> computeCropPx (juce::Rectangle<int>   imagePx,
         return {};
 
     // Outward rounding so a fractional element box never crops slightly inside it.
-    const int x = (int) std::floor (regionPts.getX()      * scale);
-    const int y = (int) std::floor (regionPts.getY()      * scale);
-    const int r = (int) std::ceil  (regionPts.getRight()  * scale);
-    const int b = (int) std::ceil  (regionPts.getBottom() * scale);
+    const int x = clampPxToInt (std::floor ((double) regionPts.getX()      * scale));
+    const int y = clampPxToInt (std::floor ((double) regionPts.getY()      * scale));
+    const int r = clampPxToInt (std::ceil  ((double) regionPts.getRight()  * scale));
+    const int b = clampPxToInt (std::ceil  ((double) regionPts.getBottom() * scale));
 
     return juce::Rectangle<int> (x, y, r - x, b - y).getIntersection (imagePx);
 }
@@ -119,7 +129,11 @@ void captureWindowAsync (juce::Component& comp,
     at approximately `fps`.
     @param onFrame  called per written frame (on a capture worker thread) with the
                     PNG path, its timestamp in seconds from start, and pixel size.
-    @param onDone   called once at the end with ok, the frame count, and an error.
+    @param onDone   called once at the end with ok, the frame count (frames actually
+                    written), and an error. ok=true with a non-empty error is a
+                    non-fatal warning (e.g. stopping the stream reported a problem).
+    @param shouldStop polled while the stream runs (on a worker); returning true ends
+                    the stream early (the bridge's stop() uses it to cancel streams).
     `viewportCrop` matches captureWindowAsync. Must be called on the message thread
     (it reads the native window handle). Only implemented on macOS 14+ so far;
     other platforms report failure via onDone. */
@@ -129,7 +143,19 @@ void captureStreamAsync (juce::Component& comp,
                          int durationMs,
                          juce::Rectangle<int> viewportCrop,
                          std::function<void (juce::String pngPath, double tSeconds, int w, int h)> onFrame,
-                         std::function<void (bool ok, int frameCount, juce::String error)> onDone);
+                         std::function<void (bool ok, int frameCount, juce::String error)> onDone,
+                         std::function<bool()> shouldStop);
+
+/** False when the OS cannot run a shot_stream at all (macOS before 14, where
+    ScreenCaptureKit streaming is missing); true elsewhere, where availability is
+    decided by whether a stream function is bound. The bridge gates both the
+    `hello.ops` advertisement and the op itself on this. Any thread. */
+bool streamCaptureOsSupported();
+
+/** Blocks (up to timeoutMs) until no platform capture worker thread is still
+    running. Windows runs each capture on its own worker; the bridge calls this from
+    stop() so a worker never outlives it. A no-op where captures run on OS queues. */
+void waitForCaptureWorkers (int timeoutMs);
 
 } // namespace web_agent::detail
 

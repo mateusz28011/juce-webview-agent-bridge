@@ -26,12 +26,80 @@ const releaseScript = fs.readFileSync(path.join(repoRoot, 'scripts/release.sh'),
 const GATE_START = '# --- the changelog must already describe this release';
 const GATE_END = '# --- write every version site';
 
+/** Extract a block of the real script between two exact marker strings, so a
+ * test can never drift from what actually runs during a release. */
+function extractBlock(start, end) {
+  const from = releaseScript.indexOf(start);
+  const to = releaseScript.indexOf(end);
+  assert.ok(from >= 0 && to > from, `markers still present in scripts/release.sh: "${start}" .. "${end}"`);
+  return releaseScript.slice(from, to);
+}
+
 /** The gate exactly as the release runs it — no second copy to keep in sync. */
 function extractGate() {
-  const from = releaseScript.indexOf(GATE_START);
-  const to = releaseScript.indexOf(GATE_END);
-  assert.ok(from >= 0 && to > from, 'the changelog gate markers are still in scripts/release.sh');
+  return extractBlock(GATE_START, GATE_END);
+}
+
+const VERSION_GATE_START = '# --- compute the new version';
+const VERSION_GATE_END = 'tag="v${new}"';
+
+/** The version-parsing + validation block (bump keyword / explicit X.Y.Z,
+ * regex-checked, and required to be greater than the current version). */
+function extractVersionGate() {
+  return extractBlock(VERSION_GATE_START, VERSION_GATE_END);
+}
+
+/** Run the version gate against a package.json fixture + a bump argument;
+ * resolve its exit code, output, and the resulting $new (if it succeeded). */
+function runVersionGate(currentVersion, bumpArg) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wab-release-version-'));
+  try {
+    fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ version: currentVersion }));
+    fs.writeFileSync(path.join(dir, 'gate.sh'), extractVersionGate());
+    try {
+      const out = execFileSync(
+        'bash',
+        ['-c', 'set -e; source ./gate.sh; echo "NEW=${new}"', 'gate', bumpArg],
+        { cwd: dir, encoding: 'utf8', stdio: 'pipe' },
+      );
+      const m = out.match(/NEW=(\S+)/);
+      return { code: 0, out, new: m ? m[1] : undefined };
+    } catch (e) {
+      return { code: e.status ?? 1, out: `${e.stdout ?? ''}${e.stderr ?? ''}`, new: undefined };
+    }
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+}
+
+/** Grab a single line of the real script verbatim, by its exact leading text. */
+function extractLine(startsWith) {
+  const from = releaseScript.indexOf(startsWith);
+  assert.ok(from >= 0, `line still present in scripts/release.sh: "${startsWith}"`);
+  const to = releaseScript.indexOf('\n', from);
   return releaseScript.slice(from, to);
+}
+
+const README_TAG_SED = 'sed -i.bak -E "s|(GIT_TAG +)v[0-9]+\\.[0-9]+\\.[0-9]+|\\1${tag}|" README.md';
+const README_TAG_GREP = 'grep -qE "GIT_TAG +${tag}" README.md';
+
+/** Run the README GIT_TAG sed + its grep verification against a README
+ * fixture — both lines pulled verbatim from the real script. */
+function runReadmeTagUpdate(readme, { tag = 'v0.7.0' } = {}) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wab-release-readme-'));
+  try {
+    fs.writeFileSync(path.join(dir, 'README.md'), readme);
+    const sedLine = extractLine(README_TAG_SED);
+    const grepLine = extractLine(README_TAG_GREP);
+    const script = `${sedLine}\nrm -f README.md.bak\n${grepLine}\n`;
+    fs.writeFileSync(path.join(dir, 'gate.sh'), script);
+    try {
+      const out = execFileSync('bash', ['-c', 'set -e; source ./gate.sh'], {
+        cwd: dir, encoding: 'utf8', stdio: 'pipe', env: { ...process.env, tag },
+      });
+      return { code: 0, out, readme: fs.readFileSync(path.join(dir, 'README.md'), 'utf8') };
+    } catch (e) {
+      return { code: e.status ?? 1, out: `${e.stdout ?? ''}${e.stderr ?? ''}` };
+    }
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 }
 
 /** Run the gate against a changelog fixture; resolve its exit code + output. */
@@ -159,4 +227,47 @@ test("the repo's own changelog is prepared for the version in package.json", () 
     `CHANGELOG.md has no section for the current version ${version}`);
   assert.match(changelog, new RegExp(`^\\[${version.replace(/\./g, '\\.')}\\]: .*/releases/tag/v${version.replace(/\./g, '\\.')}$`, 'm'),
     `CHANGELOG.md has no bottom link for v${version}`);
+});
+
+// --- version validation (patch/minor/major bump, explicit X.Y.Z, and the
+// new-must-be-greater-than-current check) ------------------------------------
+
+test('patch/minor/major bumps still compute correctly from the current version', () => {
+  assert.equal(runVersionGate('1.2.3', 'patch').new, '1.2.4');
+  assert.equal(runVersionGate('1.2.3', 'minor').new, '1.3.0');
+  assert.equal(runVersionGate('1.2.3', 'major').new, '2.0.0');
+});
+
+test('an explicit well-formed X.Y.Z greater than current is accepted', () => {
+  const { code, new: newVersion } = runVersionGate('1.2.3', '1.2.4');
+  assert.equal(code, 0);
+  assert.equal(newVersion, '1.2.4');
+});
+
+test('a malformed explicit version is refused with the usage message', () => {
+  for (const bad of ['1.2', '1.2.3.4', 'v1.2.3', '1.2.3-beta', 'abc', '']) {
+    const { code, out } = runVersionGate('1.2.3', bad);
+    assert.equal(code, 1, `expected "${bad}" to be refused`);
+    assert.match(out, /Usage: scripts\/release\.sh patch\|minor\|major\|X\.Y\.Z/, `for input "${bad}"`);
+  }
+});
+
+test('an explicit version that is not greater than the current one is refused', () => {
+  for (const notGreater of ['1.2.3', '1.2.2', '1.2.0', '0.9.9']) {
+    const { code, out } = runVersionGate('1.2.3', notGreater);
+    assert.equal(code, 1, `expected "${notGreater}" to be refused`);
+    assert.match(out, /is not greater than the current version 1\.2\.3/, `for input "${notGreater}"`);
+  }
+});
+
+// --- README FetchContent GIT_TAG pin: sed writes it, grep must verify what
+// sed actually wrote (any amount of padding whitespace, not exactly 8 spaces) --
+
+test('the GIT_TAG sed + verification round-trip regardless of padding width', () => {
+  for (const spaces of [1, 4, 8, 12]) {
+    const readme = `\`\`\`cmake\nFetchContent_Declare(juce_webview_agent_bridge\n    GIT_REPOSITORY https://github.com/mateusz28011/juce-webview-agent-bridge.git\n    GIT_TAG${' '.repeat(spaces)}v0.6.0)\nFetchContent_MakeAvailable(juce_webview_agent_bridge)\n\`\`\`\n`;
+    const { code, readme: updated } = runReadmeTagUpdate(readme, { tag: 'v0.7.0' });
+    assert.equal(code, 0, `expected padding of ${spaces} spaces to pass verification`);
+    assert.match(updated, /GIT_TAG\s+v0\.7\.0\)/);
+  }
 });

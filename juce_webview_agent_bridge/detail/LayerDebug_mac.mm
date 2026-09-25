@@ -26,13 +26,35 @@ static void collectWebViews (NSView* view, NSMutableArray<WKWebView*>* out)
         collectWebViews (sub, out);
 }
 
-bool setCompositingDebugOverlays (bool enabled)
+// JUCE hosts a WebBrowserComponent's WKWebView in an NSViewComponent child of
+// that component; walk `c`'s own component subtree for those and collect the
+// WKWebViews inside their NSViews.
+static void collectFromComponent (juce::Component& c, NSMutableArray<WKWebView*>* out)
+{
+    if (auto* nsvc = dynamic_cast<juce::NSViewComponent*> (&c))
+        if (NSView* view = (NSView*) nsvc->getView())
+            collectWebViews (view, out);
+
+    for (auto* child : c.getChildren())
+        collectFromComponent (*child, out);
+}
+
+// Every WKWebView belonging to `scope` (the WebView connect() bound) — never the
+// rest of its window, let alone the whole app: in a DAW, one window can hold
+// several plugin instances' WebViews, and NSApp.windows holds every one.
+static NSArray<WKWebView*>* webViewsIn (juce::Component* scope)
 {
     NSMutableArray<WKWebView*>* webViews = [NSMutableArray array];
 
-    for (NSWindow* window in NSApp.windows)
-        if (window.contentView != nil)
-            collectWebViews (window.contentView, webViews);
+    if (scope != nullptr)
+        collectFromComponent (*scope, webViews);
+
+    return webViews;
+}
+
+bool setCompositingDebugOverlays (juce::Component* scope, bool enabled)
+{
+    NSArray<WKWebView*>* webViews = webViewsIn (scope);
 
     bool applied = false;
 
@@ -67,13 +89,9 @@ bool setCompositingDebugOverlays (bool enabled)
     return applied && webViews.count > 0;
 }
 
-std::string getCaLayerTreeAsText()
+std::string getCaLayerTreeAsText (juce::Component* scope)
 {
-    NSMutableArray<WKWebView*>* webViews = [NSMutableArray array];
-
-    for (NSWindow* window in NSApp.windows)
-        if (window.contentView != nil)
-            collectWebViews (window.contentView, webViews);
+    NSArray<WKWebView*>* webViews = webViewsIn (scope);
 
     if (webViews.count == 0)
         return {};
@@ -89,7 +107,8 @@ std::string getCaLayerTreeAsText()
         return {};
 
     NSString* text = ((NSString* (*) (id, SEL)) objc_msgSend) (webView, dump);
-    return text != nil ? std::string ([text UTF8String]) : std::string();
+    const char* utf8 = text != nil ? [text UTF8String] : nullptr;
+    return utf8 != nullptr ? std::string (utf8) : std::string();
 }
 
 } // namespace web_agent::detail

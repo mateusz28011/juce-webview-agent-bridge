@@ -12,12 +12,12 @@
 namespace web_agent::detail
 {
 
-bool setCompositingDebugOverlays (bool)
+bool setCompositingDebugOverlays (juce::Component*, bool)
 {
     return false;
 }
 
-std::string getCaLayerTreeAsText()
+std::string getCaLayerTreeAsText (juce::Component*)
 {
     return {};
 }

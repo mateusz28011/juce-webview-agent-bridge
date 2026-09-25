@@ -36,13 +36,13 @@ function el({ tag = 'DIV', text = '', attrs = {}, style = {}, rect = { x: 0, y: 
 // qsa: Map(selector -> element list); the fake querySelectorAll just serves it,
 // so these tests pin __wae's own logic (parsing, filtering, dedup, geometry) —
 // not the browser's CSS engine.
-function installHelpers({ qsa = new Map(), elementFromPoint = () => null, byId = {} } = {}) {
+function installHelpers({ qsa = new Map(), elementFromPoint = () => null, byId = {}, viewport = null } = {}) {
   const document = {
     querySelectorAll: (s) => qsa.get(s) || [],
     elementFromPoint,
     getElementById: (id) => byId[id] || null,
   };
-  const win = { document };
+  const win = { document, ...(viewport ? { innerWidth: viewport.w, innerHeight: viewport.h } : {}) };
   win.window = win;
   const ctx = vm.createContext({ window: win, document, getComputedStyle: (n) => n._style });
   assert.equal(vm.runInContext(PAGE_HELPERS, ctx, { filename: 'PAGE_HELPERS' }), 'ok');
@@ -64,6 +64,15 @@ test('resolveAll: text= matches exact trimmed text only', () => {
   const W = installHelpers({ qsa: new Map([['body *', [save, saveAll]]]) });
   assert.deepEqual([...W.resolveAll('text=Save')], [save], 'trimmed exact match; "Save All" excluded');
   assert.deepEqual([...W.resolveAll('text=Nope')], []);
+});
+
+test('resolveAll: text= keeps only the innermost match, not wrappers with the same text', () => {
+  const btn = el({ tag: 'BUTTON', text: 'Save' });
+  const span = el({ tag: 'SPAN', text: 'Save', contains: (o) => o === span || o === btn });
+  const wrap = el({ tag: 'DIV', text: 'Save', contains: (o) => o === wrap || o === span || o === btn });
+  const other = el({ tag: 'P', text: 'Save' }); // an unrelated second match survives
+  const W = installHelpers({ qsa: new Map([['body *', [wrap, span, btn, other]]]) });
+  assert.deepEqual([...W.resolveAll('text=Save')], [btn, other]);
 });
 
 test('resolveAll: role= maps tags + [role=], dedups, and filters by accessible name', () => {
@@ -168,4 +177,45 @@ test('ariaSnapshot: aria-label wins, aria-labelledby resolves through getElement
   root.children = [byAria, byLabel];
   const snap = JSON.parse(JSON.stringify(installHelpers({ byId: { lbl: label } }).ariaSnapshot(root)));
   assert.deepEqual(snap.map((n) => n.name), ['Direct', 'The Label']);
+});
+
+// ---- scroll into view, call records, chunked reads ------------------------------
+
+test('scrollIntoViewIfNeeded: scrolls an off-viewport element to centre, leaves a visible one alone', () => {
+  const calls = [];
+  const far = el({ rect: { x: 10, y: 2000, w: 50, h: 20 }, scrollIntoView: (o) => calls.push(o) });
+  const near = el({ rect: { x: 10, y: 10, w: 50, h: 20 }, scrollIntoView: (o) => calls.push(o) });
+  const W = installHelpers({ viewport: { w: 800, h: 600 } });
+  assert.equal(W.scrollIntoViewIfNeeded(near), false);
+  assert.equal(calls.length, 0);
+  assert.equal(W.scrollIntoViewIfNeeded(far), true);
+  assert.deepEqual(JSON.parse(JSON.stringify(calls)), [{ block: 'center', inline: 'center' }]);
+  const partly = el({ rect: { x: 790, y: 10, w: 50, h: 20 }, scrollIntoView: (o) => calls.push(o) });
+  assert.equal(W.scrollIntoViewIfNeeded(partly), true, 'partly clipped counts as off-viewport');
+  assert.equal(installHelpers().scrollIntoViewIfNeeded(far), false, 'no viewport size known -> no-op');
+});
+
+test('callFree drops the page-side backend call record', () => {
+  const W = installHelpers();
+  W._calls[5] = { done: true, value: 1 };
+  assert.equal(W.callDone(5), 1);
+  W.callFree(5);
+  assert.equal(W.callDone(5), -1);
+});
+
+test('bigInit/bigAt/bigFree: host value contract, keyed buffers, surrogate-safe slices', () => {
+  const W = installHelpers();
+  const read = (key, n) => { let out = '', off = 0; const len = W._big[key].length; while (off < len) { const p = W.bigAt(key, off, n); out += p; off += p.length; } return out; };
+  assert.equal(W.bigInit('a', null), 0);
+  assert.equal(W.bigInit('b', undefined), 0);
+  assert.equal(W.bigInit('c', () => 1), 0, 'unserializable -> empty');
+  W.bigInit('d', { x: 1 }); assert.equal(read('d', 2), '{"x":1}');
+  const s = 'a\u{1F600}\u{1F600}b';
+  W.bigInit('e', s);
+  assert.equal(W.bigAt('e', 0, 2), 'a', 'a slice never ends on a high surrogate');
+  for (const n of [2, 3, 4, 5]) assert.equal(read('e', n), s, `chunk ${n}`);
+  W.bigInit('f', 'keep');
+  W.bigFree('e');
+  assert.equal(W.bigAt('e', 0, 2), null, 'freed buffer is gone');
+  assert.equal(W.bigAt('f', 0, 4), 'keep', 'other keys untouched');
 });

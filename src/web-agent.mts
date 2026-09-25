@@ -31,20 +31,29 @@ import path from 'node:path';
 import { BridgeOpError, DEFAULT_PORT, assertProtocolSupported, listInstances, loadDiscovery, onJsonLines, parseHello, requireOp } from './shared.mjs';
 import type { BridgeCapabilities } from './shared.mjs';
 
-type ProtocolMessage = Record<string, any>;
-type SinkEvent = { kind?: string; t?: number; data?: Record<string, any> };
+type ProtocolMessage = Record<string, unknown>;
+type SinkEvent = { kind?: unknown; t?: unknown; data?: unknown };
+
+/** A command-line mistake: reported as `usage: …` with exit code 2. */
+class UsageError extends Error {}
 
 const argv = process.argv.slice(2);
+let argError: string | null = null;
 const opt = (name: string, def: string): string => {
   const i = argv.indexOf(name);
-  if (i >= 0 && i + 1 < argv.length) { const v = argv[i + 1]; argv.splice(i, 2); return v; }
-  return def;
+  if (i < 0) return def;
+  const v = argv[i + 1];
+  if (v === undefined || v.startsWith('--')) { argError = `${name} needs a value`; argv.splice(i, 1); return def; }
+  argv.splice(i, 2);
+  return v;
 };
 
 const HOST = opt('--host', '127.0.0.1');
 const portArg = opt('--port', process.env.WEB_AGENT_PORT || '');
 const tokenArg = opt('--token', process.env.WEB_AGENT_TOKEN || '');
-const disc = loadDiscovery(portArg ? Number(portArg) : undefined);
+if (portArg && !(Number.isInteger(Number(portArg)) && Number(portArg) > 0 && Number(portArg) < 65536))
+  argError ??= `--port must be a TCP port number, got ${JSON.stringify(portArg)}`;
+const disc = argError ? {} : loadDiscovery(portArg ? Number(portArg) : undefined);
 const PORT = Number(portArg || disc.port || DEFAULT_PORT);
 const TOKEN = tokenArg || disc.token || '';
 const [cmd, ...rest] = argv;
@@ -56,25 +65,57 @@ function connect(): Promise<net.Socket> {
   });
 }
 
-// Send one request line, resolve with the first matching reply (by id).
-function request(obj: ProtocolMessage, { timeoutMs = 15000 }: { timeoutMs?: number } = {}): Promise<ProtocolMessage> {
-  return new Promise(async (resolve, reject) => {
-    let sock: net.Socket;
-    try { sock = await connect(); } catch (e) { return reject(e); }
+// Send one request line on a fresh connection, resolve with the first matching
+// reply (by id). Settles exactly once: reply, timeout, socket error, an
+// unparseable reply for this id, a rejected auth, or the host closing the
+// connection first. The socket is always destroyed on settle so nothing keeps
+// the process alive. With a token, a small {"op":"auth"} line goes first (as
+// e2e.connect does), so the request itself never has to carry the token — the
+// host caps unauthenticated lines that do not present a valid one.
+async function request(obj: ProtocolMessage, { timeoutMs = 15000 }: { timeoutMs?: number } = {}): Promise<ProtocolMessage> {
+  const sock = await connect();
+  return new Promise((resolve, reject) => {
     const id = Math.floor(Math.random() * 1e9);
-    const timer = setTimeout(() => { sock.destroy(); reject(new Error('timeout')); }, timeoutMs);
+    const authId = id + 1;
+    let settled = false;
+    const finish = (err: Error | null, m?: ProtocolMessage) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      sock.destroy();
+      if (err) reject(err); else resolve(m!);
+    };
+    const timer = setTimeout(() => finish(new Error('timeout')), timeoutMs);
     onJsonLines(sock, (m) => {
-      if (m.id === id) { clearTimeout(timer); sock.end(); resolve(m); }
+      if (m.id === id) finish(null, m);
+      else if (TOKEN && m.id === authId && m.ok !== true) finish(new BridgeOpError(m.error, 'authentication failed'));
+    }, {
+      onError: (e) => { if (e.id === undefined || e.id === id || e.id === authId) finish(e); },
     });
-    sock.on('error', (e) => { clearTimeout(timer); reject(e); });
-    sock.write(JSON.stringify({ ...obj, id, ...(TOKEN ? { token: TOKEN } : {}) }) + '\n');
+    sock.on('error', (e) => finish(e));
+    sock.on('close', () => finish(new Error('connection closed')));
+    if (TOKEN) sock.write(JSON.stringify({ op: 'auth', id: authId, token: TOKEN }) + '\n');
+    sock.write(JSON.stringify({ ...obj, id }) + '\n');
   });
 }
 
-async function evalJs(code: string, timeoutMs = 15000): Promise<any> {
+async function evalJs(code: string, timeoutMs = 15000): Promise<unknown> {
   const r = await request({ op: 'eval', code }, { timeoutMs });
   if (!r.ok) throw new BridgeOpError(r.error, 'eval failed');
   return r.result;
+}
+
+/** The message of a `{ok:false}` reply's structured error, if it has one. */
+function errMessage(r: ProtocolMessage): string | undefined {
+  const e = r.error;
+  return e && typeof e === 'object' && typeof (e as { message?: unknown }).message === 'string'
+    ? (e as { message: string }).message : undefined;
+}
+
+/** Parse the page ring buffer as returned by the backlog snippet. */
+function parseBacklog(raw: unknown): SinkEvent[] {
+  const arr = typeof raw === 'string' ? JSON.parse(raw) as unknown : raw;
+  return Array.isArray(arr) ? arr as SinkEvent[] : [];
 }
 
 function fmt(v: unknown): string {
@@ -121,7 +162,8 @@ function requireHostOp(op: string, api: string): void {
   requireOp(hostCaps, op, api);
 }
 
-async function main() {
+async function main(): Promise<void> {
+  if (argError) throw new UsageError(argError);
   // `instances` is purely local — it enumerates discovery files and never opens a
   // socket, so handle it before any connection or handshake.
   if (cmd === 'instances') {
@@ -146,24 +188,23 @@ async function main() {
   switch (cmd) {
     case 'ping': {
       const r = await request({ op: 'ping' });
-      console.log(r.ok ? `pong (127.0.0.1:${PORT})` : 'no pong');
+      if (!r.ok) throw new Error(`no pong (127.0.0.1:${PORT})${errMessage(r) ? ': ' + errMessage(r) : ''}`);
+      console.log(`pong (127.0.0.1:${PORT})`);
       break;
     }
     case 'layerdebug': {
       requireHostOp('layerdebug', 'the `layerdebug` command');
       const enabled = rest[0] !== 'off';
       const r = await request({ op: 'layerdebug', enabled });
-      console.log(
-        r.ok
-          ? `compositing overlays ${enabled ? 'ON' : 'OFF'} (layer borders + repaint counters)`
-          : `failed: ${r.error?.message || 'unavailable'}`
-      );
+      if (!r.ok) throw new BridgeOpError(r.error, 'layerdebug unavailable');
+      console.log(`compositing overlays ${enabled ? 'ON' : 'OFF'} (layer borders + repaint counters)`);
       break;
     }
     case 'layertree': {
       requireHostOp('layertree', 'the `layertree` command');
       const r = await request({ op: 'layertree' });
-      console.log(r.ok ? r.text : `failed: ${r.error?.message || 'unavailable'}`);
+      if (!r.ok) throw new BridgeOpError(r.error, 'layertree unavailable');
+      console.log(typeof r.text === 'string' ? r.text : '');
       break;
     }
     case 'hello': {
@@ -176,28 +217,34 @@ async function main() {
       break;
     }
     case 'eval': {
-      if (!rest[0]) throw new Error('usage: eval "<js>"');
+      if (!rest[0]) throw new UsageError('eval "<js>"');
       console.log(fmt(await evalJs(rest.join(' '))));
       break;
     }
     case 'dom': {
-      const sel = rest[0] || 'html';
-      const code = `(() => { const el = document.querySelector(${JSON.stringify(sel)}); return el ? el.outerHTML : 'no element: ' + ${JSON.stringify(sel)}; })()`;
-      console.log(fmt(await evalJs(code)));
+      const sel = rest.join(' ') || 'html';
+      const code = `(() => { const el = document.querySelector(${JSON.stringify(sel)}); return el ? el.outerHTML : null; })()`;
+      const html = await evalJs(code);
+      if (html == null) throw new Error('no element: ' + sel);
+      console.log(fmt(html));
       break;
     }
     case 'click': {
-      if (!rest[0]) throw new Error('usage: click <selector>');
+      if (!rest[0]) throw new UsageError('click <selector>');
       const sel = rest.join(' ');
       const code = `(() => { const el = document.querySelector(${JSON.stringify(sel)}); if (!el) return 'no element'; el.scrollIntoView(); el.click(); return 'clicked'; })()`;
-      console.log(fmt(await evalJs(code)));
+      const r = await evalJs(code);
+      if (r !== 'clicked') throw new Error(`${fmt(r)}: ${sel}`);
+      console.log(r);
       break;
     }
     case 'fill': {
-      if (rest.length < 2) throw new Error('usage: fill <selector> <value>');
+      if (rest.length < 2) throw new UsageError('fill <selector> <value>');
       const sel = rest[0];
       const val = rest.slice(1).join(' ');
-      console.log(fmt(await evalJs(fillSnippet(sel, val))));
+      const r = await evalJs(fillSnippet(sel, val));
+      if (r !== 'ok') throw new Error(fmt(r));
+      console.log(r);
       break;
     }
     case 'capture': {
@@ -207,9 +254,7 @@ async function main() {
       break;
     }
     case 'backlog': {
-      const r = await evalJs(`JSON.stringify(window.__webAgentBuffer || [])`);
-      const arr = typeof r === 'string' ? JSON.parse(r) : r;
-      for (const e of arr) printSink(e);
+      for (const e of parseBacklog(await evalJs(`JSON.stringify(window.__webAgentBuffer || [])`))) printSink(e);
       break;
     }
     case 'shot': {
@@ -231,7 +276,7 @@ async function main() {
       }
       const r = await request({ op: 'shot', ...(out ? { path: out } : {}), ...(rect ? { rect } : {}) }, { timeoutMs: 30000 });
       if (!r.ok) throw new BridgeOpError(r.error, 'native screenshot failed');
-      console.log(r.path);
+      console.log(String(r.path));
       break;
     }
     case 'logs': {
@@ -239,42 +284,82 @@ async function main() {
       // dumps the page ring buffer so you also get the recent history in one go.
       if (rest.includes('--backlog') || rest.includes('-b')) {
         try {
-          const buf = await evalJs(`JSON.stringify(window.__webAgentBuffer || [])`);
-          for (const e of (typeof buf === 'string' ? JSON.parse(buf) : buf)) printSink(e);
+          for (const e of parseBacklog(await evalJs(`JSON.stringify(window.__webAgentBuffer || [])`))) printSink(e);
         } catch (e) { process.stderr.write(`[juce-webview-agent-bridge] backlog unavailable: ${e instanceof Error ? e.message : String(e)}\n`); }
       }
+      // The stream runs until the host closes the socket (or Ctrl-C); the open
+      // socket is what keeps the process alive, so main() just returns.
       const sock = await connect();
-      if (TOKEN) sock.write(JSON.stringify({ op: 'auth', token: TOKEN }) + '\n'); // authenticate before streaming
+      const authId = Math.floor(Math.random() * 1e9);
+      // Always open with an auth line (tokenless when we have none): a tokenless
+      // host simply acks it, a token-requiring one rejects it at once — so a missing
+      // token is reported instead of the stream silently ending when the host
+      // drops the unauthenticated connection.
+      let authAcked = false;
+      let failed = false;
+      const fail = (msg: string) => {
+        if (failed) return;
+        failed = true;
+        console.error(`error: ${msg}`);
+        process.exitCode = 1;
+        sock.destroy();
+      };
+      sock.write(JSON.stringify({ op: 'auth', id: authId, ...(TOKEN ? { token: TOKEN } : {}) }) + '\n'); // authenticate before streaming
       process.stderr.write(`[juce-webview-agent-bridge] streaming from 127.0.0.1:${PORT} (Ctrl-C to stop)\n`);
-      onJsonLines(sock, (m) => { if (m.op === 'sink') printSink(m.event as SinkEvent); });
-      sock.on('error', (e) => { console.error(e.message); process.exit(1); });
-      sock.on('close', () => process.exit(0));
+      onJsonLines(sock, (m) => {
+        if (m.op === 'sink') { printSink(m.event as SinkEvent); return; }
+        if (m.id === authId) {
+          if (m.ok === true) authAcked = true;
+          else fail(errMessage(m) ?? 'authentication failed');
+        }
+      });
+      sock.on('error', (e) => fail(e.message));
+      // Closed before the auth ack (e.g. the host dropped an unauthenticated
+      // connection after ~5 s): a failure, not a clean end of the stream.
+      sock.on('close', () => { if (!authAcked) fail('connection closed before authentication was acknowledged'); });
       break;
     }
     default:
-      console.error('unknown command. run with no valid command to see usage in the header.');
-      process.exit(2);
+      throw new UsageError('unknown command. run with no valid command to see usage in the header.');
   }
 }
 
+const str = (v: unknown): string => (v == null ? '' : typeof v === 'string' ? v : fmt(v));
+
+// Never throws: sink frames come from the page, and one malformed event must not
+// take down a `logs` stream.
 function printSink(e: SinkEvent): void {
-  if (!e) return;
-  const ts = new Date(e.t || Date.now()).toISOString().slice(11, 23);
-  const d = e.data || {};
-  if (e.kind === 'console') console.log(`${ts} ${(d.level || 'log').toUpperCase().padEnd(5)} ${(d.args || []).join(' ')}`);
-  else if (e.kind === 'error') console.log(`${ts} ERROR ${d.message || ''}${d.stack ? '\n' + d.stack : ''}`);
+  try { printSinkUnsafe(e); } catch { /* malformed event: skip it */ }
+}
+
+function printSinkUnsafe(e: SinkEvent): void {
+  if (!e || typeof e !== 'object') return;
+  const t = typeof e.t === 'number' && Number.isFinite(e.t) ? e.t : Date.now();
+  const ts = new Date(t).toISOString().slice(11, 23);
+  const d = (e.data && typeof e.data === 'object' ? e.data : {}) as Record<string, unknown>;
+  if (e.kind === 'console') {
+    const args = Array.isArray(d.args) ? d.args.map(str).join(' ') : str(d.args);
+    console.log(`${ts} ${(str(d.level) || 'log').toUpperCase().padEnd(5)} ${args}`);
+  }
+  else if (e.kind === 'error') console.log(`${ts} ERROR ${str(d.message)}${d.stack ? '\n' + str(d.stack) : ''}`);
   else if (e.kind === 'net') {
     // data.kind: fetch | xhr | ws | sse | beacon | timing. ws/sse carry event(+dir);
     // request/response bodies + headers ride along only while `capture` is armed.
-    const tag = (d.kind || 'net').toUpperCase().padEnd(6);
-    const ev = d.event ? d.event + (d.dir ? '/' + d.dir : '') : (d.method || '');
-    const req = d.reqBody ? '\n  req:  ' + d.reqBody : '';
-    const body = d.body ? '\n  body: ' + d.body : '';
-    console.log(`${ts} ${tag}${ev} ${d.status ?? d.code ?? ''} ${d.url || d.name || ''} ${d.ms != null ? d.ms + 'ms' : ''}${req}${body}`);
+    const tag = (str(d.kind) || 'net').toUpperCase().padEnd(6);
+    const ev = d.event ? str(d.event) + (d.dir ? '/' + str(d.dir) : '') : str(d.method);
+    const req = d.reqBody ? '\n  req:  ' + str(d.reqBody) : '';
+    const body = d.body ? '\n  body: ' + str(d.body) : '';
+    console.log(`${ts} ${tag}${ev} ${str(d.status ?? d.code)} ${str(d.url || d.name)} ${d.ms != null ? str(d.ms) + 'ms' : ''}${req}${body}`);
   }
-  else console.log(`${ts} ${e.kind} ${fmt(d)}`);
+  else console.log(`${ts} ${str(e.kind)} ${fmt(d)}`);
 }
 
-main()
-  .then(() => { if (cmd !== 'logs') process.exit(0); })
-  .catch((e: unknown) => { console.error('error:', e instanceof Error ? e.message : String(e)); process.exit(1); });
+// Exit via process.exitCode, never process.exit(): stdout to a pipe is
+// asynchronous on macOS, and a hard exit right after console.log truncates
+// large output (e.g. `eval` / `dom` / `layertree`) at the 64 KB pipe buffer.
+// Every request socket is destroyed on settle, so the process ends by itself.
+main().catch((e: unknown) => {
+  const usage = e instanceof UsageError;
+  console.error(usage ? 'usage:' : 'error:', e instanceof Error ? e.message : String(e));
+  process.exitCode = usage ? 2 : 1;
+});

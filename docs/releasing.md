@@ -14,9 +14,11 @@ published.
 
 The six version sites: `package.json`, `package-lock.json`, the JUCE module
 declaration `version:`, the `WEB_AGENT_BRIDGE_VERSION` macro that the `hello`
-reply reports, `tests/CMakeLists.txt`, and the README `GIT_TAG` pin. The last two
-of those live in the same file as each other's neighbours, so a release commit
-touching only 5 files is normal.
+reply reports, `tests/CMakeLists.txt`, and the README `GIT_TAG` pin. The module
+declaration and the `WEB_AGENT_BRIDGE_VERSION` macro share one file
+(`juce_webview_agent_bridge/juce_webview_agent_bridge.h`), so those six sites live
+in five files. The release commit also stages `tools/` (the generated clients),
+so it normally touches six files, not five.
 
 ## 1. Agree the exact version
 

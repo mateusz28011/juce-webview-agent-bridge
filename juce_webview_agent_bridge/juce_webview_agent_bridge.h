@@ -15,6 +15,7 @@
    dependencies:       juce_gui_extra
    OSXFrameworks:      ImageIO CoreGraphics CoreMedia CoreImage CoreVideo
    WeakOSXFrameworks:  ScreenCaptureKit
+   windowsLibs:        ws2_32 bcrypt d3d11 windowsapp
 
   END_JUCE_MODULE_DECLARATION
 

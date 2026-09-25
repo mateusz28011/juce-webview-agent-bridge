@@ -14,8 +14,34 @@ import net from 'node:net';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import vm from 'node:vm';
+import { spawnSync } from 'node:child_process';
+import { EventEmitter } from 'node:events';
 
-import { activateApp, connect, expect, fileLogger, parseLayerTree } from '../tools/e2e.mjs';
+import { activateApp, connect, expect, fileLogger, parseLayerTree, PAGE_HELPERS } from '../tools/e2e.mjs';
+import { listInstances, loadDiscovery, onJsonLines } from '../tools/shared.mjs';
+
+// The op set the mock advertises by default. Pinned to the real module's kOpTable
+// by the 'mock ops mirror kOpTable' test below, so the mock cannot drift from the host.
+const DEFAULT_OPS = ['hello', 'ping', 'auth', 'eval', 'eval_big', 'bounds', 'shot', 'shot_stream', 'layerdebug', 'layertree', 'sink_replay'];
+
+// Returned from onEval to make the mock never answer that eval (a stalled host).
+const HANG = Symbol('hang');
+
+// The host's eval_big value contract (WebAgentBridge.cpp handleEvalBig):
+// undefined/null -> ''; string as-is; else JSON.stringify, undefined -> ''.
+function hostString(v) {
+  if (v == null) return '';
+  if (typeof v === 'string') return v;
+  const s = JSON.stringify(v);
+  return s === undefined ? '' : s;
+}
+// The host's eval_big chunk boundary: a slice never ends on a high surrogate.
+function hostSlice(s, off, n) {
+  let end = Math.min(off + n, s.length);
+  if (end < s.length && end - off > 1) { const c = s.charCodeAt(end - 1); if (c >= 0xd800 && c <= 0xdbff) end--; }
+  return s.slice(off, end);
+}
 
 // Close every page opened during a test, even if an assertion threw first — a
 // leaked persistent socket would otherwise keep node --test from exiting.
@@ -26,7 +52,7 @@ afterEach(() => { for (const p of openPages.splice(0)) { try { p.close(); } catc
 // test script the result per eval via onEval(code, state). It also tracks every
 // connected socket so a test can push unsolicited `sink` frames (the live
 // console/network/error stream) via the returned pushSink() helper.
-function startMock({ onEval, onEvalBig, onShot, onShotStream, onLayerTree, hello = {}, dropOnHello = false } = {}) {
+function startMock({ onEval, onEvalBig, onShot, onShotStream, onLayerTree, hello = {}, dropOnHello = false, bigChunk = 60000 } = {}) {
   const state = { evals: [], token: null, sockets: [], helloCount: 0 };
   const server = net.createServer((sock) => {
     sock.on('error', () => {});
@@ -51,7 +77,7 @@ function startMock({ onEval, onEvalBig, onShot, onShotStream, onLayerTree, hello
           if (dropOnHello) { sock.destroy(); return; } // transport failure, not a legacy host
           reply({ op: 'hello', ok: true, protocolVersion: 2, platform: 'mac',
                   moduleVersion: '0.4.0',
-                  ops: ['hello', 'ping', 'auth', 'eval', 'eval_big', 'bounds', 'shot', 'shot_stream', 'layerdebug', 'layertree', 'sink_replay'],
+                  ops: DEFAULT_OPS,
                   screenshotAvailable: true, authRequired: true, ...hello });
           continue;
         }
@@ -66,19 +92,22 @@ function startMock({ onEval, onEvalBig, onShot, onShotStream, onLayerTree, hello
           let result;
           try { result = onEval ? onEval(m.code, state) : 'ok'; }
           catch (e) { reply({ op: 'eval', ok: false, error: { code: 'EVAL_ERROR', message: String(e) } }); continue; }
+          if (result === HANG) continue;
+          if (result && typeof result === 'object' && typeof result.__raw === 'string') { sock.write(result.__raw.replace('$ID', String(m.id)) + '\n'); continue; }
           reply({ op: 'eval', ok: true, result });
           continue;
         }
         if (m.op === 'eval_big') {
           state.evals.push(m.code);
-          if (onEvalBig) { reply({ op: 'eval_big', ok: true, result: onEvalBig(m.code, state) }); continue; }
-          // Emulate a real host: assemble the value via the same __wae chunk protocol
-          // the readBig fallback (and these tests) mock, so switching readBig to the
-          // native op returns the same thing the fallback would.
+          // Follow the HOST's eval_big contract (not the client fallback): evaluate the
+          // expression to a raw value (onEvalBig, else onEval with {big:true}), convert
+          // it with hostString, then read it back in bigChunk slices that never split
+          // a surrogate pair, advancing by each slice's actual length.
           try {
-            const len = onEval ? onEval(`window.__wae.chunkInit(${m.code})`, state) : 0;
+            const v = onEvalBig ? onEvalBig(m.code, state) : onEval ? onEval(m.code, state, { big: true }) : undefined;
+            const str = hostString(v);
             let out = '';
-            for (let off = 0; off < len; off += 32000) out += onEval(`window.__wae.chunkAt(${off}, 32000)`, state);
+            for (let off = 0; off < str.length;) { const piece = hostSlice(str, off, bigChunk); out += piece; off += piece.length; }
             reply({ op: 'eval_big', ok: true, result: out });
           } catch (e) { reply({ op: 'eval_big', ok: false, error: { code: 'EVAL_ERROR', message: String(e) } }); }
           continue;
@@ -234,33 +263,52 @@ test('selectors (text= / role= / css) reach the page resolver verbatim', async (
   } finally { server.close(); }
 });
 
-// Slice the scripted chunk for chunkInit/chunkAt (parses offsets out of the code).
+// Serve a scripted big value on BOTH readBig paths: the native eval_big op (the
+// mock calls onEval with {big:true} and wants the raw value) and the client-side
+// fallback's keyed bigInit/bigAt/bigFree protocol (parses key/offsets from the code).
 function chunkResponder(getValue) {
-  let buf = '';
-  return (code) => {
-    if (code.includes('__wae.chunkInit(')) { buf = getValue(); return buf.length; }
-    if (code.includes('__wae.chunkAt(')) { const m = code.match(/chunkAt\((\d+),\s*(\d+)\)/); const s = +m[1]; return buf.slice(s, s + +m[2]); }
+  const bufs = new Map();
+  return (code, _state, ctx) => {
+    if (ctx && ctx.big) return getValue();
+    let m = code.match(/__wae\.bigInit\("([^"]+)"/);
+    if (m) { const s = hostString(getValue()); bufs.set(m[1], s); return s.length; }
+    m = code.match(/__wae\.bigAt\("([^"]+)", (\d+), (\d+)\)/);
+    if (m) { const s = bufs.get(m[1]); return s == null ? null : hostSlice(s, +m[2], +m[3]); }
+    m = code.match(/__wae\.bigFree\("([^"]+)"\)/);
+    if (m) { bufs.delete(m[1]); return 1; }
     return undefined;
   };
+}
+
+// A "page" that really runs the injected snippets: PAGE_HELPERS under node:vm, and
+// every eval code executed in that context. Pins the client's generated JS end to
+// end (syntax, the __wae contract) instead of pattern-matching strings.
+function vmPage(globals = {}) {
+  const ctx = vm.createContext({ ...globals });
+  ctx.window = ctx;
+  vm.runInContext(PAGE_HELPERS, ctx);
+  const onEval = (code) => vm.runInContext(code, ctx);
+  return { ctx, onEval };
 }
 
 test('backend() invokes a native fn, polls completion, returns the parsed result', async () => {
   const result = [{ key: 'init' }, { key: 'b' }];
   let polls = 0;
   const chunk = chunkResponder(() => JSON.stringify(result));
-  const onEval = (code) => {
+  const onEval = (code, state, ctx) => {
     if (code.includes('window.__wae =')) return 'ok';
     if (code.includes('__wae.invoke(')) return 700;
     if (code.includes('__wae.callDone(')) { polls++; return polls >= 2 ? 1 : 0; }
-    const c = chunk(code); if (c !== undefined) return c;
+    const c = chunk(code, state, ctx); if (c !== undefined) return c;
     return 'ok';
   };
-  const { server, port } = await startMock({ onEval });
+  const { server, state, port } = await startMock({ onEval });
   try {
     const page = await openPage(port);
     const r = await page.backend('someNativeFn', 1, 'arg');
     assert.deepEqual(r, result);
     assert.ok(polls >= 2, `polled completion until done (polls=${polls})`);
+    assert.ok(state.evals.some((c) => c.includes('callFree(700)')), 'page-side call record released');
   } finally { server.close(); }
 });
 
@@ -285,10 +333,10 @@ test('readBig() reassembles a value larger than the chunk size', async () => {
   const big = 'ABCDEFGHIJ'.repeat(10); // 100 chars
   let chunkCalls = 0;
   const chunk = chunkResponder(() => big);
-  const onEval = (code) => {
+  const onEval = (code, state, ctx) => {
     if (code.includes('window.__wae =')) return 'ok';
-    if (code.includes('__wae.chunkAt(')) chunkCalls++;
-    const c = chunk(code); if (c !== undefined) return c;
+    if (code.includes('__wae.bigAt(')) chunkCalls++;
+    const c = chunk(code, state, ctx); if (c !== undefined) return c;
     return 'ok';
   };
   // This exercises the client-side chunk loop specifically, so force the fallback
@@ -308,9 +356,9 @@ test('readBig() reassembles a value larger than the chunk size', async () => {
 test('page.ariaSnapshot reads a structured role/name tree via readBig', async () => {
   const snap = JSON.stringify([{ role: 'button', name: 'Save' }, { role: 'textbox', name: 'Email', value: 'a@b.c' }]);
   const chunk = chunkResponder(() => snap);
-  const onEval = (code) => {
+  const onEval = (code, state, ctx) => {
     if (code.includes('window.__wae =')) return 'ok';
-    const c = chunk(code); if (c !== undefined) return c;
+    const c = chunk(code, state, ctx); if (c !== undefined) return c;
     return 'ok';
   };
   const { server, port } = await startMock({ onEval });
@@ -325,10 +373,10 @@ test('page.ariaSnapshot reads a structured role/name tree via readBig', async ()
 test('locator.ariaSnapshot snapshots a subtree after waiting for visibility', async () => {
   const snap = JSON.stringify({ role: 'form', children: [{ role: 'button', name: 'Go' }] });
   const chunk = chunkResponder(() => snap);
-  const onEval = (code) => {
+  const onEval = (code, state, ctx) => {
     if (code.includes('window.__wae =')) return 'ok';
     if (code.includes('resolveAll')) return found();
-    const c = chunk(code); if (c !== undefined) return c;
+    const c = chunk(code, state, ctx); if (c !== undefined) return c;
     return 'ok';
   };
   const { server, port } = await startMock({ onEval });
@@ -654,16 +702,16 @@ test('readBig uses the native eval_big op when the host advertises it', async ()
     const page = await openPage(port);
     const out = await page.readBig('window.bigState');
     assert.equal(out, big, 'gets the full native result in one request');
-    // PAGE_HELPERS defines W.chunkInit, so match the fallback CALL (window.__wae.chunkInit(...)).
-    assert.ok(!state.evals.some((c) => c.includes('__wae.chunkInit(')), 'did not fall back to the __wae chunk loop');
+    // PAGE_HELPERS defines W.bigInit, so match the fallback CALL (window.__wae.bigInit(...)).
+    assert.ok(!state.evals.some((c) => c.includes('__wae.bigInit(')), 'did not fall back to the __wae chunk loop');
     page.close();
   } finally { server.close(); }
 });
 
 test('readBig falls back to the __wae chunk loop on a host without eval_big', async () => {
   const onEval = (code) => {
-    if (code.includes('__wae.chunkInit')) return 5;
-    if (code.includes('__wae.chunkAt')) return 'HELLO';
+    if (code.includes('__wae.bigInit(')) return 5;
+    if (code.includes('__wae.bigAt(')) return 'HELLO';
     return 'ok';
   };
   const { server, port, state } = await startMock({
@@ -674,7 +722,7 @@ test('readBig falls back to the __wae chunk loop on a host without eval_big', as
     const page = await openPage(port);
     const out = await page.readBig('window.x');
     assert.equal(out, 'HELLO');
-    assert.ok(state.evals.some((c) => c.includes('__wae.chunkInit')), 'used the client-side chunk fallback');
+    assert.ok(state.evals.some((c) => c.includes('__wae.bigInit(')), 'used the client-side chunk fallback');
     page.close();
   } finally { server.close(); }
 });
@@ -984,7 +1032,7 @@ test('page.poll returns the value once pred holds, without throwing', async () =
   let reads = 0;
   const onEval = (code) => {
     if (code.includes('window.__wae =')) return 'ok';
-    if (code.includes('JSON.stringify(window.someCounter')) return String(++reads);
+    if (code.includes('JSON.stringify((\nwindow.someCounter\n)')) return String(++reads);
     return 'ok';
   };
   const { server, port } = await startMock({ onEval });
@@ -1036,10 +1084,10 @@ test('measureRenderPerf installs the probe, then returns parsed stats (motion vi
     framesDroppedRel: 3, framesDropped2x: 1, p99Frames: 3.6, motion: true };
   const chunk = chunkResponder(() => JSON.stringify(stats));
   let installed = 0;
-  const onEval = (code) => {
+  const onEval = (code, state, ctx) => {
     if (code.includes('window.__wae =')) return 'ok';
     if (code.includes('__waePerfProbe=J')) { installed++; assert.ok(code.includes('.knob path'), 'motionSelector reached the probe'); return 1; }
-    const c = chunk(code); if (c !== undefined) return c;
+    const c = chunk(code, state, ctx); if (c !== undefined) return c;
     return 'ok';
   };
   const { server, port } = await startMock({ onEval });
@@ -1056,4 +1104,346 @@ test('measureRenderPerf installs the probe, then returns parsed stats (motion vi
 test('activateApp resolves false without an app name (and off-macOS)', async () => {
   assert.equal(await activateApp(''), false);
   assert.equal(await activateApp(undefined), false);
+});
+
+// ---- quality-review regressions ------------------------------------------------
+
+test('mock ops mirror the C++ kOpTable (the mock cannot drift from the host)', () => {
+  const cpp = fs.readFileSync(new URL('../juce_webview_agent_bridge/detail/WebAgentBridge.cpp', import.meta.url), 'utf8');
+  // Parse `{ "opname", &Impl::handler }` entries from the table definition, sized or
+  // not; platform-gated entries (#if around a row) still count — compare the full table.
+  const at = cpp.search(/kOpTable\s*\[\s*\d*\s*\]\s*=?\s*\{/);
+  assert.ok(at >= 0, 'kOpTable definition found');
+  const body = cpp.slice(at, cpp.indexOf('};', at));
+  const ops = [...body.matchAll(/\{\s*"([a-z_]+)"\s*,/g)].map((m) => m[1]);
+  assert.ok(ops.length >= 5, `parsed the op table (${ops.join(', ')})`);
+  assert.deepEqual([...ops].sort(), [...DEFAULT_OPS].sort());
+});
+
+test('pointer actions scroll the target into view inside the actionability probe', async () => {
+  const probes = [];
+  const onEval = (code) => {
+    if (code.includes('window.__wae =')) return 'ok';
+    if (code.includes('resolveAll')) { probes.push(code); return found({ editable: true }); }
+    return 'ok';
+  };
+  const { server, port } = await startMock({ onEval });
+  try {
+    const page = await openPage(port);
+    for (const act of ['click', 'hover', 'dblclick']) {
+      probes.length = 0;
+      await page.locator('#far')[act]();
+      assert.ok(probes.length && probes.every((c) => c.includes('scrollIntoViewIfNeeded(el)')), `${act} probes scroll`);
+    }
+    probes.length = 0;
+    await page.locator('#far').fill('x');
+    assert.ok(!probes.some((c) => c.includes('scrollIntoViewIfNeeded(el)')), 'non-pointer probes do not scroll');
+  } finally { server.close(); }
+});
+
+test('poll / pollStable / readBig parenthesize the expression (a || b stays valid JS)', async () => {
+  const { ctx, onEval } = vmPage({ a: 0, b: 'B' });
+  for (const ops of [DEFAULT_OPS, DEFAULT_OPS.filter((o) => o !== 'eval_big')]) {
+    const { server, port } = await startMock({ onEval, hello: { ops } });
+    try {
+      const page = await openPage(port);
+      assert.equal(await page.poll('a || b', (v) => v === 'B', { timeout: 200 }), 'B');
+      assert.equal(await page.pollStable('a || b', { timeout: 200, interval: 5 }), 'B');
+      assert.equal(await page.readBig('a || b'), 'B', `readBig via ${ops.includes('eval_big') ? 'eval_big' : 'fallback'}`);
+      ctx.fn = () => 1;
+      assert.equal(await page.poll('fn', () => true), null, 'an unserializable value reads as null, not a hung eval');
+    } finally { server.close(); }
+  }
+});
+
+test('poll / pollStable / readBig tolerate a trailing // comment in the expression', async () => {
+  const { onEval } = vmPage({ x: 'X' });
+  for (const ops of [DEFAULT_OPS, DEFAULT_OPS.filter((o) => o !== 'eval_big')]) {
+    const { server, port } = await startMock({ onEval, hello: { ops } });
+    try {
+      const page = await openPage(port);
+      const via = ops.includes('eval_big') ? 'eval_big' : 'fallback';
+      assert.equal(await page.readBig('x // c'), 'X', `readBig via ${via}`);
+      assert.equal(await page.poll('x // c', (v) => v === 'X', { timeout: 200 }), 'X', `poll (${via})`);
+      assert.equal(await page.pollStable('x // c', { timeout: 200, interval: 5 }), 'X', `pollStable (${via})`);
+    } finally { server.close(); }
+  }
+});
+
+test('readBig: host value contract + surrogate-safe chunking, identical on both paths', async () => {
+  const emoji = 'ab\u{1F600}cd\u{1F680}\u{1F680}e';
+  const cases = [
+    ['null', ''], ['undefined', ''], ['({ x: 1, y: [2] })', '{"x":1,"y":[2]}'], ['(() => 1)', ''],
+    ['42', '42'], ['"plain"', 'plain'], ['emoji', emoji],
+  ];
+  for (const native of [true, false]) {
+    const { ctx, onEval } = vmPage({ emoji });
+    const { server, port } = await startMock({
+      onEval, bigChunk: 3, hello: { ops: native ? DEFAULT_OPS : DEFAULT_OPS.filter((o) => o !== 'eval_big') },
+    });
+    try {
+      const page = await openPage(port);
+      for (const [expr, want] of cases) {
+        // chunk:3 puts a slice boundary right after 'ab' + a high surrogate.
+        assert.equal(await page.readBig(expr, { chunk: 3 }), want, `${native ? 'eval_big' : 'fallback'}: ${expr}`);
+      }
+      assert.deepEqual(Object.keys(ctx.__wae._big), [], 'fallback buffers are freed after each read');
+    } finally { server.close(); }
+  }
+});
+
+test('readBig fallback reads are keyed: concurrent reads do not clobber each other', async () => {
+  const { onEval } = vmPage({ one: 'A'.repeat(50), two: 'B'.repeat(70) });
+  const { server, port } = await startMock({ onEval, hello: { ops: DEFAULT_OPS.filter((o) => o !== 'eval_big') } });
+  try {
+    const page = await openPage(port);
+    const [x, y] = await Promise.all([page.readBig('one', { chunk: 7 }), page.readBig('two', { chunk: 7 })]);
+    assert.equal(x, 'A'.repeat(50));
+    assert.equal(y, 'B'.repeat(70));
+  } finally { server.close(); }
+});
+
+test('after a page reload wipes window.__wae, the helpers self-heal (re-inject + retry)', async () => {
+  const emitted = [];
+  const { ctx, onEval } = vmPage({ __JUCE__: { backend: { emitEvent: (n, p) => emitted.push(p.name), addEventListener() {} } } });
+  const { server, state, port } = await startMock({ onEval });
+  try {
+    const page = await openPage(port);
+    vm.runInContext("delete window.__wae", ctx); // simulate a reload
+    assert.equal(await page.fireBackend('doThing'), true);
+    assert.deepEqual(emitted, ['doThing']);
+    assert.equal(state.evals.filter((c) => c.includes('window.__wae = W')).length, 2, 're-injected exactly once');
+    vm.runInContext("delete window.__wae", ctx);
+    assert.equal(await page.readBig('"after reload"'), 'after reload');
+  } finally { server.close(); }
+});
+
+test('a request after the connection closed rejects immediately', async () => {
+  const { server, state, port } = await startMock({ onEval: () => 'ok' });
+  try {
+    const page = await openPage(port);
+    for (const s of state.sockets) s.destroy();
+    await page.waitForEvent('*', { timeout: 2000 }).catch(() => {}); // settles once the close lands
+    const t0 = Date.now();
+    await assert.rejects(() => page.evaluate('1'), /closed/);
+    assert.ok(Date.now() - t0 < 500, 'no 15 s request timeout');
+    const p2 = await openPage(port);
+    p2.close();
+    await assert.rejects(() => p2.evaluate('1'), /closed/);
+  } finally { server.close(); }
+});
+
+test('waitForEvent / waitForResponse / captureStream reject when the connection closes', async () => {
+  const { server, state, port } = await startMock({
+    onEval: () => 'ok',
+    onShotStream: (_m, st) => { for (const s of st.sockets) s.destroy(); return 0; },
+  });
+  try {
+    let page = await openPage(port);
+    const ev = page.waitForEvent('net', { timeout: 10000 });
+    const resp = page.waitForResponse('/x', { timeout: 10000 });
+    const t0 = Date.now();
+    for (const s of state.sockets) s.destroy();
+    await assert.rejects(ev, /aborted/);
+    await assert.rejects(resp, /aborted/);
+    assert.ok(Date.now() - t0 < 2000, 'rejected on close, not on timeout');
+    page = await openPage(port);
+    await assert.rejects(() => page.captureStream({ durationMs: 50, timeout: 10000 }), /closed/);
+  } finally { server.close(); }
+});
+
+test('an unparseable reply fails its own request instead of timing out', async () => {
+  const onEval = (code) => (code === 'garbage' ? { __raw: '{"id":$ID,"ok":tru' } : 'ok');
+  const { server, port } = await startMock({ onEval });
+  try {
+    const page = await openPage(port);
+    const t0 = Date.now();
+    await assert.rejects(() => page.evaluate('garbage'), /unparseable/);
+    assert.ok(Date.now() - t0 < 1000);
+    assert.equal(await page.evaluate('1'), 'ok', 'the connection stays usable');
+  } finally { server.close(); }
+});
+
+test('onJsonLines: reassembles split lines, surfaces bad lines, caps line length', () => {
+  const sock = new EventEmitter();
+  let destroyed = null;
+  sock.destroy = (e) => { destroyed = e; };
+  const got = [], errs = [];
+  onJsonLines(sock, (m) => got.push(m), { onError: (e) => errs.push(e), maxLineLength: 64 });
+  const wire = Buffer.from('{"id":1,"v":"café"}\n\n{"id":2,"v":"x"}\n{"id":3,"v":nope}\n');
+  for (let i = 0; i < wire.length; i++) sock.emit('data', wire.subarray(i, i + 1)); // byte-by-byte
+  assert.deepEqual(got, [{ id: 1, v: 'café' }, { id: 2, v: 'x' }]);
+  assert.equal(errs.length, 1);
+  assert.equal(errs[0].id, 3, 'the reply id is recovered from the bad line');
+  sock.emit('data', Buffer.from('x'.repeat(65)));
+  assert.equal(errs.length, 2);
+  assert.match(errs[1].message, /exceeds 64/);
+  assert.ok(destroyed, 'socket destroyed on an over-long line');
+  sock.emit('data', Buffer.from('{"id":4}\n'));
+  assert.equal(got.length, 2, 'nothing delivered after the reader gave up');
+
+  // Without onError, a bad line is skipped (historical behaviour for callers).
+  const s2 = new EventEmitter(); const got2 = [];
+  onJsonLines(s2, (m) => got2.push(m));
+  s2.emit('data', Buffer.from('not json\n{"ok":true}\n'));
+  assert.deepEqual(got2, [{ ok: true }]);
+});
+
+test('loadDiscovery: a preferred port never falls back to another instance', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'wab-disc-'));
+  const saved = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE };
+  process.env.HOME = home; process.env.USERPROFILE = home;
+  try {
+    const d = path.join(home, '.web_agent_bridge.d');
+    fs.mkdirSync(d);
+    fs.writeFileSync(path.join(d, '9001.json'), JSON.stringify({ port: 9001, token: 'A', pid: process.pid }));
+    fs.writeFileSync(path.join(home, '.web_agent_bridge.json'), JSON.stringify({ port: 9100, token: 'LEGACY' }));
+    assert.equal(loadDiscovery(9001).token, 'A');
+    assert.deepEqual(loadDiscovery(9002), {}, 'unregistered port -> {} (not instance 9001, not the legacy file)');
+    assert.equal(loadDiscovery(9100).token, 'LEGACY', 'the legacy file still serves its own port');
+    assert.equal(loadDiscovery().token, 'A', 'no preference -> lowest live instance');
+  } finally {
+    for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('listInstances skips records whose host process is gone', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'wab-disc-'));
+  const saved = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE };
+  process.env.HOME = home; process.env.USERPROFILE = home;
+  try {
+    const deadPid = spawnSync(process.execPath, ['-e', '']).pid; // exited by the time spawnSync returns
+    const d = path.join(home, '.web_agent_bridge.d');
+    fs.mkdirSync(d);
+    fs.writeFileSync(path.join(d, '9001.json'), JSON.stringify({ port: 9001, token: 'STALE', pid: deadPid }));
+    fs.writeFileSync(path.join(d, '9002.json'), JSON.stringify({ port: 9002, token: 'LIVE', pid: process.pid }));
+    fs.writeFileSync(path.join(d, '9003.json'), JSON.stringify({ port: 9003, token: 'OLD' })); // no pid: older host, kept
+    assert.deepEqual(listInstances().map((i) => i.port), [9002, 9003]);
+    assert.equal(loadDiscovery().token, 'LIVE', 'the stale lower port is not picked first');
+  } finally {
+    for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('toHaveText / toHaveValue with a /g or /y RegExp do not flake via lastIndex', async () => {
+  const { server, port } = await startMock({ onEval: (c) => (c.includes('resolveAll') ? found({ text: 'Ready', value: '128' }) : 'ok') });
+  try {
+    const page = await openPage(port);
+    const re = /Ready/g;
+    // With a shared lastIndex, every other test() fails, so .not would "pass".
+    await assert.rejects(() => expect(page.locator('.s')).not.toHaveText(re, { timeout: 150 }), /not\.toHaveText/);
+    await expect(page.locator('.s')).toHaveText(re, { timeout: 150 });
+    await assert.rejects(() => expect(page.locator('input')).not.toHaveValue(/128/y, { timeout: 150 }), /not\.toHaveValue/);
+    assert.equal(re.lastIndex, 0, 'the caller\'s RegExp is untouched');
+  } finally { server.close(); }
+});
+
+test('type() accepts a number', async () => {
+  const { onEval, seen } = actionMock();
+  const { server, port } = await startMock({ onEval });
+  try {
+    const page = await openPage(port);
+    await page.locator('input').type(42);
+    const code = seen.find((c) => c.includes('keydown'));
+    assert.match(code, /const text = "42";/);
+    assert.doesNotThrow(() => new vm.Script(code));
+  } finally { server.close(); }
+});
+
+test('locator waits honor their timeout even when the host stalls a probe', async () => {
+  const onEval = (code) => (code.includes('window.__wae =') ? 'ok' : code.includes('resolveAll') ? HANG : 'ok');
+  const { server, port } = await startMock({ onEval });
+  try {
+    const page = await openPage(port);
+    const t0 = Date.now();
+    await assert.rejects(() => page.locator('#x').click({ timeout: 300 }), /not ready for "click" within 300ms/);
+    assert.ok(Date.now() - t0 < 2000, `bounded by the locator timeout (took ${Date.now() - t0}ms), not the 15 s request timeout`);
+  } finally { server.close(); }
+});
+
+test('drag always releases (mouseup) even when a move fails', async () => {
+  const seen = [];
+  const onEval = (code) => {
+    if (code.includes('window.__wae =')) return 'ok';
+    if (code.includes('resolveAll')) return found();
+    if (code.includes("MouseEvent('mousemove'")) throw new Error('move blew up');
+    seen.push(code); return 'ok';
+  };
+  const { server, port } = await startMock({ onEval });
+  try {
+    const page = await openPage(port);
+    await assert.rejects(() => page.locator('.knob').drag({ dy: 10, steps: 2, settleMs: 0, stepMs: 0 }), /move blew up/);
+    assert.ok(seen.some((c) => c.includes("MouseEvent('mouseup'")), 'mouseup still sent');
+  } finally { server.close(); }
+});
+
+test('backend() fails fast when a reload drops the pending call record', async () => {
+  const onEval = (code) => {
+    if (code.includes('window.__wae =')) return 'ok';
+    if (code.includes('__wae.invoke(')) return 700;
+    if (code.includes('__wae.callDone(')) return -1;
+    return 'ok';
+  };
+  const { server, port } = await startMock({ onEval });
+  try {
+    const page = await openPage(port, { backendTimeoutMs: 5000 });
+    const t0 = Date.now();
+    await assert.rejects(() => page.backend('fn'), /lost: the page reloaded/);
+    assert.ok(Date.now() - t0 < 1000);
+  } finally { server.close(); }
+});
+
+test('measureRenderPerf: never stacks DevTools-hook wrappers and auto-stops page-side', async () => {
+  const installs = [];
+  const stats = { durMs: 1 };
+  const chunk = chunkResponder(() => JSON.stringify(stats));
+  const onEval = (code, state, ctx) => {
+    if (code.includes('window.__wae =')) return 'ok';
+    if (code.includes('__waePerfProbe=J')) { installs.push(code); return 1; }
+    const c = chunk(code, state, ctx); if (c !== undefined) return c;
+    return 'ok';
+  };
+  const { server, port } = await startMock({ onEval });
+  try {
+    const page = await openPage(port);
+    await page.measureRenderPerf({ durationMs: 1 });
+    await page.measureRenderPerf({ durationMs: 1 });
+  } finally { server.close(); }
+
+  let now = 0; const frames = [];
+  const orig = function orig() { return 'orig'; };
+  const hook = { onCommitFiberRoot: orig };
+  const ctx = vm.createContext({ performance: { now: () => now }, requestAnimationFrame: (f) => frames.push(f), __REACT_DEVTOOLS_GLOBAL_HOOK__: hook });
+  ctx.window = ctx;
+  vm.runInContext(installs[0], ctx);
+  const first = ctx.__waePerfProbe;
+  // Simulate a stale wrapper left behind (e.g. a crashed client) before the next run.
+  vm.runInContext(installs[1], ctx);
+  assert.equal(first.running, false, 'the earlier probe was stopped');
+  assert.equal(hook.onCommitFiberRoot.__waeOrig, orig, 'wraps the ORIGINAL hook, not the previous wrapper');
+  assert.equal(hook.onCommitFiberRoot(), 'orig');
+  const J = ctx.__waePerfProbe;
+  assert.equal(J.commits, 1);
+  now = J.maxMs + 1; // nobody came back to read it
+  frames.at(-1)();
+  assert.equal(J.running, false, 'auto-stopped after maxMs');
+  assert.equal(hook.onCommitFiberRoot, orig, 'hook restored on auto-stop');
+});
+
+test('getByTestId quotes the id as a CSS string; press derives KeyboardEvent.code', async () => {
+  const { onEval, seen } = actionMock();
+  const probes = [];
+  const { server, port } = await startMock({ onEval: (c) => { if (c.includes('resolveAll')) probes.push(c); return onEval(c); } });
+  try {
+    const page = await openPage(port);
+    await page.getByTestId('a"b\\c').isVisible();
+    assert.ok(probes.some((c) => c.includes(JSON.stringify('[data-testid="a\\"b\\\\c"]'))), 'quote + backslash escaped');
+    for (const [key, code] of [['a', 'KeyA'], ['Z', 'KeyZ'], ['1', 'Digit1'], ['Enter', 'Enter'], [' ', 'Space'], ['Shift', 'ShiftLeft'], ['/', 'Slash']]) {
+      seen.length = 0;
+      await page.locator('input').press(key);
+      assert.ok(seen.some((c) => c.includes(`code: ${JSON.stringify(code)}`)), `${JSON.stringify(key)} -> ${code}`);
+    }
+  } finally { server.close(); }
 });

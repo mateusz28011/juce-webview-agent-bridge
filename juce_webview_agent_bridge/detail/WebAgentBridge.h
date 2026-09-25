@@ -25,9 +25,12 @@
         // 3. on teardown (before the WebView is destroyed):
         bridge->stop();
 
-    THREADING: a socket accept thread + one read thread per connection.
-    evaluateJavascript() is marshalled to the message thread (its result
-    callback also fires there). The audio thread is never involved.
+    THREADING: a socket accept thread + one read thread and one write thread per
+    connection. evaluateJavascript() is marshalled to the message thread (its
+    result callback also fires there). Replies and sink frames are only queued
+    from the message thread; each connection's write thread does the socket I/O,
+    so a client that stops reading can never stall the message thread. The audio
+    thread is never involved.
 
   ==============================================================================
 */
@@ -66,7 +69,9 @@ public:
 
     // Frame-rate window capture: a persistent stream writes one PNG per frame into a
     // directory. onFrame fires per frame (may run on a capture worker thread); onDone
-    // fires once at the end. Same viewportCrop semantics as ScreenshotFn.
+    // fires once at the end. Same viewportCrop semantics as ScreenshotFn. When onDone
+    // reports ok=true with a non-empty `error`, that text is a non-fatal warning (the
+    // `shot_stream` reply carries it as `warning`, never as an `error` object).
     using StreamFrameCallback = std::function<void (juce::String pngPath, double tSeconds, int widthPx, int heightPx)>;
     using StreamDoneCallback  = std::function<void (bool ok, int frameCount, juce::String error)>;
     using StreamFn            = std::function<void (juce::File dir, int fps, int durationMs,
@@ -113,16 +118,16 @@ public:
         Called from the registered native sink function (message thread). */
     void pushSink (const juce::var& event);
 
-    /** Cap simultaneously-connected clients (default 16; 0 = unlimited). One
-        blocking read thread runs per client, so this bounds a local process from
+    /** Cap simultaneously-connected clients (default 16; 0 = unlimited). A read
+        thread and a write thread run per client, so this bounds a local process from
         exhausting threads by opening many connections. Beyond the cap, a new
         connection is accepted and immediately closed. */
     void setMaxConnections (int maxConnections);
 
-    /** Tune the sink buffers: `queueMax` is the pending-broadcast backlog before the
-        oldest events are dropped (default 4096, floored at 1); `historyMax` is how
-        many recent frames `sink_replay` can resend (default 1024, 0 disables replay).
-        Take effect immediately. */
+    /** Tune the sink buffers: `queueMax` is each connection's pending-broadcast
+        backlog before its oldest undelivered sink events are dropped (default 4096,
+        floored at 1); `historyMax` is how many recent frames `sink_replay` can resend
+        (default 1024, 0 disables replay). Take effect immediately. */
     void setSinkLimits (int queueMax, int historyMax);
 
     /** Optional human-readable label published in this instance's discovery record
@@ -134,6 +139,10 @@ public:
 private:
     struct Impl;
     std::shared_ptr<Impl> impl;
+
+    // connect() also scopes layerdebug/layertree to the bound WebView and ties
+    // shot_stream cancellation to stop(); both live in the private Impl.
+    friend void connect (WebAgentBridge&, juce::WebBrowserComponent&, juce::Component&);
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (WebAgentBridge)
 };
@@ -165,9 +174,12 @@ withCapture (juce::WebBrowserComponent::Options options,
              std::weak_ptr<WebAgentBridge> bridge,
              CaptureOptions captureOptions = {});
 
-/** Wires the bridge's eval + bounds callbacks to a live WebView. Holds the
-    components weakly (juce::Component::SafePointer), so it is safe even if the
-    WebView is destroyed before the bridge is stopped. */
+/** Wires the bridge's eval, bounds and screenshot callbacks to a live WebView,
+    plus shot_stream on macOS (the only platform with native frame-rate capture;
+    elsewhere the op stays unbound and unadvertised). layerdebug/layertree act on
+    this WebView only. Holds the components weakly (juce::Component::SafePointer),
+    so it is safe even if the WebView is destroyed before the bridge is stopped.
+    stop() clears these callbacks, so call connect() again before a restart. */
 void connect (WebAgentBridge& bridge,
               juce::WebBrowserComponent& webView,
               juce::Component& boundsComponent);

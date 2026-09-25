@@ -33,7 +33,7 @@ inline const char* kCaptureScript = R"WEBAGENTJS(
   if (window.__webAgentInstalled) return;
   window.__webAgentInstalled = true;
 
-  var MAXLEN = 4000, BUFMAX = 500;
+  var MAXLEN = 4000, BUFMAX = 500, BODYMAX = 64 * 1024; // BODYMAX: bytes read from a response body, at most
   var buf = (window.__webAgentBuffer = []);
   if (typeof window.__webAgentCapture === 'undefined') window.__webAgentCapture = false;
 
@@ -70,6 +70,27 @@ inline const char* kCaptureScript = R"WEBAGENTJS(
     } catch (e) {}
   }
   window.__webAgentSend = send;
+
+  // Read at most `limit` bytes of a (cloned) response body stream, then cancel it,
+  // so a large or never-ending body can't be buffered whole just to be clipped.
+  function readCapped(stream, limit) {
+    var reader = stream.getReader(), dec = new TextDecoder(), out = '', got = 0;
+    function pump() {
+      return reader.read().then(function (r) {
+        if (r.done) return out + dec.decode();
+        var chunk = r.value;
+        if (got + chunk.byteLength >= limit) {
+          out += dec.decode(chunk.subarray(0, limit - got));
+          try { reader.cancel(); } catch (e) {}
+          return out;
+        }
+        got += chunk.byteLength;
+        out += dec.decode(chunk, { stream: true });
+        return pump();
+      });
+    }
+    return pump();
+  }
 
   // Which hooks to install (set by withCapture; each key defaults ON when absent).
   var HOOKS = window.__webAgentCaptureHooks || {};
@@ -153,8 +174,24 @@ inline const char* kCaptureScript = R"WEBAGENTJS(
         var info = addReq({ kind: 'fetch', url: clip(url), method: method, status: resp.status, ms: Date.now() - start });
         if (window.__webAgentCapture) {
           try {
-            resp.clone().text().then(function (t) { info.body = clip(t); send('net', info); },
-                                     function () { send('net', info); });
+            // Never tee a stream that doesn't end (SSE) or buffer a huge body just to
+            // clip it: skip those (noting why), and read the rest byte-capped.
+            var ctype = '', clen = -1;
+            try {
+              if (resp.headers && typeof resp.headers.get === 'function') {
+                ctype = String(resp.headers.get('content-type') || '');
+                var cl = resp.headers.get('content-length');
+                if (cl != null && cl !== '' && isFinite(Number(cl))) clen = Number(cl);
+              }
+            } catch (e) {}
+            if (/^\s*text\/event-stream/i.test(ctype)) { info.bodyOmitted = 'event-stream'; send('net', info); return resp; }
+            if (clen > BODYMAX) { info.bodyOmitted = 'too-large'; send('net', info); return resp; }
+            var copy = resp.clone();
+            var pending = (copy.body && typeof copy.body.getReader === 'function' && typeof TextDecoder === 'function')
+              ? readCapped(copy.body, BODYMAX)
+              : copy.text();
+            pending.then(function (t) { info.body = clip(t); send('net', info); },
+                         function () { send('net', info); });
             return resp;
           } catch (e) {}
         }
@@ -183,18 +220,24 @@ inline const char* kCaptureScript = R"WEBAGENTJS(
           self.__wa.start = Date.now();
           if (window.__webAgentCapture && typeof body === 'string') self.__wa.reqBody = clip(body);
         }
-        self.addEventListener('loadend', function () {
-          try {
-            var b = self.__wa || {};
-            var info = { kind: 'xhr', url: clip(b.url), method: b.method, status: self.status, ms: Date.now() - (b.start || Date.now()) };
-            if (window.__webAgentCapture) {
-              try { info.body = clip(self.responseText); } catch (e) {}
-              if (b.reqBody != null) info.reqBody = b.reqBody;
-              if (b.reqHeaders) info.reqHeaders = b.reqHeaders;
-            }
-            send('net', info);
-          } catch (e) {}
-        });
+        // One loadend listener per XHR instance: a reused XHR (open/send again) must
+        // not stack listeners and report every later request several times. The
+        // listener reads self.__wa at fire time, which open() refreshes per request.
+        if (!self.__waListening) {
+          self.__waListening = true;
+          self.addEventListener('loadend', function () {
+            try {
+              var b = self.__wa || {};
+              var info = { kind: 'xhr', url: clip(b.url), method: b.method, status: self.status, ms: Date.now() - (b.start || Date.now()) };
+              if (window.__webAgentCapture) {
+                try { info.body = clip(self.responseText); } catch (e) {}
+                if (b.reqBody != null) info.reqBody = b.reqBody;
+                if (b.reqHeaders) info.reqHeaders = b.reqHeaders;
+              }
+              send('net', info);
+            } catch (e) {}
+          });
+        }
         return sendm.apply(self, arguments);
       };
     }
@@ -205,8 +248,12 @@ inline const char* kCaptureScript = R"WEBAGENTJS(
   if (hookOn('ws')) try {
     var OWS = window.WebSocket;
     if (OWS) {
-      var WS = function (url, protocols) {
-        var ws = protocols !== undefined ? new OWS(url, protocols) : new OWS(url);
+      // Constructed via Reflect.construct with new.target, so `class X extends
+      // WebSocket` still yields an X (prototype chain intact); calling it without
+      // `new` throws, exactly like the native constructor.
+      var WS = function WebSocket(url, protocols) {
+        if (!new.target) throw new TypeError("Failed to construct 'WebSocket': Please use the 'new' operator, this DOM object constructor cannot be called as a function.");
+        var ws = Reflect.construct(OWS, arguments, new.target || WS);
         var u = clip(typeof url === 'string' ? url : (url && url.url) || '');
         try {
           ws.addEventListener('open', function () { send('net', { kind: 'ws', event: 'open', url: u }); });
@@ -226,6 +273,7 @@ inline const char* kCaptureScript = R"WEBAGENTJS(
         return ws;
       };
       WS.prototype = OWS.prototype;
+      try { Object.setPrototypeOf(WS, OWS); } catch (e) {} // inherit statics
       ['CONNECTING', 'OPEN', 'CLOSING', 'CLOSED'].forEach(function (k) { try { WS[k] = OWS[k]; } catch (e) {} });
       window.WebSocket = WS;
     }
@@ -235,8 +283,9 @@ inline const char* kCaptureScript = R"WEBAGENTJS(
   if (hookOn('sse')) try {
     var OES = window.EventSource;
     if (OES) {
-      var ES = function (url, cfg) {
-        var es = cfg !== undefined ? new OES(url, cfg) : new OES(url);
+      var ES = function EventSource(url, cfg) {
+        if (!new.target) throw new TypeError("Failed to construct 'EventSource': Please use the 'new' operator, this DOM object constructor cannot be called as a function.");
+        var es = Reflect.construct(OES, arguments, new.target || ES);
         var u = clip(typeof url === 'string' ? url : (url && url.url) || '');
         try {
           es.addEventListener('open', function () { send('net', { kind: 'sse', event: 'open', url: u }); });
@@ -249,6 +298,8 @@ inline const char* kCaptureScript = R"WEBAGENTJS(
         return es;
       };
       ES.prototype = OES.prototype;
+      try { Object.setPrototypeOf(ES, OES); } catch (e) {} // inherit statics
+      ['CONNECTING', 'OPEN', 'CLOSED'].forEach(function (k) { try { if (k in OES) ES[k] = OES[k]; } catch (e) {} });
       window.EventSource = ES;
     }
   } catch (e) {}

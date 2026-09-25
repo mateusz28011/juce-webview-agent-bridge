@@ -21,8 +21,8 @@ import { fileURLToPath } from 'node:url';
 const CLIENT = fileURLToPath(new URL('../tools/web-agent.mjs', import.meta.url));
 
 // A mock bridge. Captures what the client sends and serves controlled replies.
-function startMockBridge({ onEval, requireToken = 'T', splitUtf8 = false, afterAuth, hello = {} } = {}) {
-  const state = { lastEval: null, lastShot: null, sawToken: null, connections: 0 };
+function startMockBridge({ onEval, requireToken = 'T', splitUtf8 = false, afterAuth, hello = {}, onOp = {} } = {}) {
+  const state = { lastEval: null, lastShot: null, sawToken: null, connections: 0, ops: [] };
   const server = net.createServer((sock) => {
     state.connections++;
     let acc = '';
@@ -42,8 +42,11 @@ function startMockBridge({ onEval, requireToken = 'T', splitUtf8 = false, afterA
           if (m.token === requireToken) authed = true;
         }
         const reply = (obj) => sock.write(JSON.stringify({ id: m.id, ...obj }) + '\n');
+        state.ops.push(m);
         if (requireToken && !authed) { reply({ op: m.op || 'auth', ok: false, error: { code: 'AUTH_REQUIRED', message: 'auth required' } }); continue; }
         if (m.op === 'auth') { reply({ op: 'auth', ok: true }); if (afterAuth) afterAuth(sock); continue; }
+        // onOp[op](m, sock) -> reply object (or null to not reply) overrides any op.
+        if (onOp[m.op]) { const r = onOp[m.op](m, sock); if (r) reply({ op: m.op, ...r }); continue; }
         if (m.op === 'ping') { reply({ op: 'ping', ok: true }); continue; }
         if (m.op === 'hello') {
           // `hello` overrides let a test stand in for an older or newer host.
@@ -179,16 +182,16 @@ test('instances: lists every registered bridge with its identity, no connection'
   const d = path.join(home, '.web_agent_bridge.d');
   fs.mkdirSync(d);
   fs.writeFileSync(path.join(d, '8930.json'), JSON.stringify(
-    { port: 8930, token: 'T', pid: 111, processName: 'Live', startedAt: '2026-07-21T10:00:00.000Z', label: 'Track 3 EQ' }));
+    { port: 8930, token: 'T', pid: process.pid, processName: 'Live', startedAt: '2026-07-21T10:00:00.000Z', label: 'Track 3 EQ' }));
   fs.writeFileSync(path.join(d, '8931.json'), JSON.stringify(
-    { port: 8931, token: 'T', pid: 222, processName: 'Reaper' }));
+    { port: 8931, token: 'T', pid: process.pid, processName: 'Reaper' }));
 
   const r = await runClient(['instances'], { home }); // no bridge running — purely local
   assert.equal(r.code, 0);
   assert.match(r.out, /:8930\b/);
   assert.match(r.out, /Track 3 EQ/);
   assert.match(r.out, /Live/);
-  assert.match(r.out, /pid 111/);
+  assert.match(r.out, new RegExp(`pid ${process.pid}\\b`));
   assert.match(r.out, /:8931\b/);
   assert.match(r.out, /Reaper/);
   assert.ok(r.out.indexOf(':8930') < r.out.indexOf(':8931'), 'sorted by port');
@@ -329,4 +332,236 @@ test('logs --backlog dumps the page ring buffer first, then streams live', async
   } finally {
     server.close();
   }
+});
+
+// ---- exit codes, output integrity, and robustness ------------------------------
+
+const ALL_OPS = ['hello', 'ping', 'auth', 'eval', 'eval_big', 'bounds', 'shot', 'shot_stream', 'layerdebug', 'layertree', 'sink_replay'];
+
+test('eval: output larger than the 64 KB pipe buffer reaches a piped stdout intact', async () => {
+  // process.exit() right after console.log truncated piped stdout at 64 KB on macOS.
+  const big = 'x'.repeat(300000);
+  const { server, port } = await startMockBridge({ onEval: () => big });
+  try {
+    const home = tempHomeWith({ port, token: 'T' });
+    const { code, out } = await runClient(['eval', 'big'], { home });
+    assert.equal(code, 0);
+    assert.equal(out.length, big.length, 'every byte arrived');
+  } finally { server.close(); }
+});
+
+test('ping: a failed ping exits non-zero', async () => {
+  const { server, port } = await startMockBridge({ onOp: { ping: () => ({ ok: false, error: { code: 'X', message: 'nope' } }) } });
+  try {
+    const home = tempHomeWith({ port, token: 'T' });
+    const { code, err } = await runClient(['ping'], { home });
+    assert.equal(code, 1);
+    assert.match(err, /no pong/);
+  } finally { server.close(); }
+});
+
+test('request: the host closing before replying fails fast with "connection closed"', async () => {
+  const { server, port } = await startMockBridge({ onOp: { ping: (_m, sock) => { sock.end(); return null; } } });
+  try {
+    const home = tempHomeWith({ port, token: 'T' });
+    const t0 = Date.now();
+    const { code, err } = await runClient(['ping'], { home });
+    assert.equal(code, 1);
+    assert.match(err, /connection closed/);
+    assert.ok(Date.now() - t0 < 10000, 'did not wait for the 15 s request timeout');
+  } finally { server.close(); }
+});
+
+test('dom: prints outerHTML, joins a multi-word selector, and exits 1 for no element', async () => {
+  const { server, state, port } = await startMockBridge({ onEval: (c) => (c.includes('"div > p"') ? '<p>hi</p>' : null) });
+  try {
+    const home = tempHomeWith({ port, token: 'T' });
+    const ok = await runClient(['dom', 'div', '>', 'p'], { home });
+    assert.equal(ok.code, 0);
+    assert.equal(ok.out, '<p>hi</p>');
+    assert.match(state.lastEval, /querySelector\("div > p"\)/, 'all args joined into one selector');
+    const miss = await runClient(['dom', '#nope'], { home });
+    assert.equal(miss.code, 1);
+    assert.match(miss.err, /no element: #nope/);
+  } finally { server.close(); }
+});
+
+test('click: reports "clicked", and exits 1 when the element is missing', async () => {
+  const { server, state, port } = await startMockBridge({ onEval: (c) => (c.includes('"#go"') ? 'clicked' : 'no element') });
+  try {
+    const home = tempHomeWith({ port, token: 'T' });
+    const ok = await runClient(['click', '#go'], { home });
+    assert.equal(ok.code, 0);
+    assert.equal(ok.out, 'clicked');
+    assert.match(state.lastEval, /el\.click\(\)/);
+    const miss = await runClient(['click', '#gone'], { home });
+    assert.equal(miss.code, 1);
+    assert.match(miss.err, /no element/);
+  } finally { server.close(); }
+});
+
+test('fill: exits 1 when the target is missing or not an input', async () => {
+  const { server, port } = await startMockBridge({ onEval: () => 'not an input/textarea: DIV' });
+  try {
+    const home = tempHomeWith({ port, token: 'T' });
+    const { code, err } = await runClient(['fill', '#d', 'x'], { home });
+    assert.equal(code, 1);
+    assert.match(err, /not an input/);
+  } finally { server.close(); }
+});
+
+test('capture: toggles window.__webAgentCapture on and off', async () => {
+  const { server, state, port } = await startMockBridge({ onEval: () => 'on' });
+  try {
+    const home = tempHomeWith({ port, token: 'T' });
+    const on = await runClient(['capture', 'on'], { home });
+    assert.equal(on.code, 0);
+    assert.match(on.out, /response-body capture: on/);
+    assert.match(state.lastEval, /__webAgentCapture = true/);
+    const off = await runClient(['capture', 'off'], { home });
+    assert.match(off.out, /response-body capture: off/);
+    assert.match(state.lastEval, /__webAgentCapture = false/);
+  } finally { server.close(); }
+});
+
+test('backlog: prints the page ring buffer, tolerating malformed events', async () => {
+  const buf = [
+    { kind: 'console', t: 1, data: { level: 'info', args: ['hello', 42] } },
+    { kind: 'console', t: 2, data: { level: 7, args: 'not-an-array' } },
+    { kind: 'net', t: 3, data: { kind: 'fetch', method: 'GET', url: '/api/x', status: 200, ms: 5 } },
+    null,
+  ];
+  const { server, port } = await startMockBridge({ onEval: () => JSON.stringify(buf) });
+  try {
+    const home = tempHomeWith({ port, token: 'T' });
+    const { code, out } = await runClient(['backlog'], { home });
+    assert.equal(code, 0);
+    assert.match(out, /INFO\s+hello 42/);
+    assert.match(out, /not-an-array/);
+    assert.match(out, /FETCH\s+GET 200 \/api\/x 5ms/);
+  } finally { server.close(); }
+});
+
+test('layerdebug / layertree: success prints, failure exits non-zero', async () => {
+  let fail = false;
+  const { server, state, port } = await startMockBridge({
+    hello: { ops: ALL_OPS },
+    onOp: {
+      layerdebug: (m) => (fail ? { ok: false, error: { code: 'LAYER_UNAVAILABLE', message: 'no WKWebView found' } } : { ok: true, enabled: m.enabled }),
+      layertree: () => (fail ? { ok: false, error: { code: 'LAYER_UNAVAILABLE', message: 'no WKWebView found' } } : { ok: true, text: '(layer bounds [x: 0 y: 0 width: 1 height: 1])' }),
+    },
+  });
+  try {
+    const home = tempHomeWith({ port, token: 'T' });
+    const on = await runClient(['layerdebug', 'off'], { home });
+    assert.equal(on.code, 0);
+    assert.match(on.out, /overlays OFF/);
+    assert.equal(state.ops.find((m) => m.op === 'layerdebug').enabled, false);
+    const tree = await runClient(['layertree'], { home });
+    assert.equal(tree.code, 0);
+    assert.match(tree.out, /layer bounds/);
+    fail = true;
+    for (const cmd of ['layerdebug', 'layertree']) {
+      const r = await runClient([cmd], { home });
+      assert.equal(r.code, 1, `${cmd} failure exits 1`);
+      assert.match(r.err, /no WKWebView found/);
+    }
+  } finally { server.close(); }
+});
+
+test('--port with no value is a usage error (exit 2), not a silent default', async () => {
+  const home = tempHomeWith(null);
+  const r = await runClient(['ping', '--port'], { home });
+  assert.equal(r.code, 2);
+  assert.match(r.err, /--port needs a value/);
+});
+
+test('--port for an unregistered port never borrows another instance\'s token', async () => {
+  const { server, state, port } = await startMockBridge({ requireToken: null });
+  try {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'wab-home-'));
+    tempDirs.push(home);
+    const d = path.join(home, '.web_agent_bridge.d');
+    fs.mkdirSync(d);
+    fs.writeFileSync(path.join(d, '1.json'), JSON.stringify({ port: 1, token: 'OTHER', pid: process.pid }));
+    fs.writeFileSync(path.join(home, '.web_agent_bridge.json'), JSON.stringify({ port: 2, token: 'LEGACY' }));
+    const r = await runClient(['ping', '--port', String(port)], { home });
+    assert.equal(r.code, 0);
+    assert.equal(state.sawToken, null, 'no token from a different instance was sent');
+  } finally { server.close(); }
+});
+
+test('logs: a rejected auth exits 1 instead of streaming nothing forever', async () => {
+  const { server, port } = await startMockBridge({ requireToken: 'SECRET' });
+  try {
+    const home = tempHomeWith({ port, token: 'WRONG' });
+    const { code, err } = await runClient(['logs'], { home });
+    assert.equal(code, 1);
+    assert.match(err, /auth required/);
+  } finally { server.close(); }
+});
+
+test('logs: malformed sink events are skipped without crashing the stream', async () => {
+  const afterAuth = (sock) => {
+    sock.write(JSON.stringify({ op: 'sink', event: { kind: 'console', t: 1, data: { args: { weird: true } } } }) + '\n');
+    sock.write(JSON.stringify({ op: 'sink', event: { kind: 'console', t: 'bad-time', data: 'nope' } }) + '\n');
+    sock.write(JSON.stringify({ op: 'sink', event: { kind: 'console', t: 2, data: { level: 'log', args: ['still-alive'] } } }) + '\n');
+    setTimeout(() => sock.end(), 20);
+  };
+  const { server, port } = await startMockBridge({ afterAuth });
+  try {
+    const home = tempHomeWith({ port, token: 'T' });
+    const { code, out, err } = await runClient(['logs'], { home });
+    assert.equal(code, 0, err);
+    assert.match(out, /still-alive/);
+  } finally { server.close(); }
+});
+
+test('logs: without a token against a token-requiring host exits 1', async () => {
+  const { server, port } = await startMockBridge({ requireToken: 'SECRET' });
+  try {
+    const home = tempHomeWith({ port }); // no token discovered
+    const { code, err } = await runClient(['logs'], { home });
+    assert.equal(code, 1);
+    assert.match(err, /auth required/);
+  } finally { server.close(); }
+});
+
+test('logs: a host closing before acknowledging auth exits 1, not silently 0', async () => {
+  // Stands in for a host that drops an unauthenticated connection without replying.
+  const server = net.createServer((sock) => {
+    sock.on('error', () => {});
+    let acc = '';
+    sock.on('data', (d) => {
+      acc += d;
+      for (let nl; (nl = acc.indexOf('\n')) >= 0; acc = acc.slice(nl + 1)) {
+        const m = JSON.parse(acc.slice(0, nl));
+        if (m.op === 'hello') sock.write(JSON.stringify({ id: m.id, op: 'hello', ok: true, protocolVersion: 2, ops: ['hello', 'auth'] }) + '\n');
+        if (m.op === 'auth') setTimeout(() => sock.end(), 50); // never acks it
+      }
+    });
+  });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  try {
+    const home = tempHomeWith({ port: server.address().port });
+    const { code, err } = await runClient(['logs'], { home });
+    assert.equal(code, 1);
+    assert.match(err, /closed before authentication/);
+  } finally { server.close(); }
+});
+
+test('eval: a large request authenticates on its own first line, never inline', async () => {
+  const { server, state, port } = await startMockBridge();
+  try {
+    const home = tempHomeWith({ port, token: 'T' });
+    const big = `'${'x'.repeat(10 * 1024)}'.length`;
+    const { code, out, err } = await runClient(['eval', big], { home });
+    assert.equal(code, 0, err);
+    assert.equal(out, 'OK');
+    const evalIdx = state.ops.findIndex((m) => m.op === 'eval');
+    assert.ok(evalIdx > 0, 'the eval was sent');
+    assert.equal(state.ops[evalIdx - 1].op, 'auth', 'an auth line precedes the request');
+    assert.equal(state.ops[evalIdx - 1].token, 'T');
+    assert.ok(state.ops.every((m) => m.op === 'auth' || m.token === undefined), 'only auth lines carry the token');
+  } finally { server.close(); }
 });

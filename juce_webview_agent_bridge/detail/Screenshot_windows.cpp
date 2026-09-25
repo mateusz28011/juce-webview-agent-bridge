@@ -31,11 +31,15 @@
 
 #include <chrono>
 #include <condition_variable>
+#include <cstring>
 #include <mutex>
 #include <thread>
 
-#pragma comment(lib, "d3d11.lib")
-#pragma comment(lib, "windowsapp.lib")
+// MSVC-only auto-link (GCC warns on it); the module declaration's windowsLibs lists the same libs.
+#ifdef _MSC_VER
+ #pragma comment(lib, "d3d11.lib")
+ #pragma comment(lib, "windowsapp.lib")
+#endif
 
 namespace web_agent::detail
 {
@@ -70,6 +74,44 @@ struct ApartmentScope
     ApartmentScope() { winrt::init_apartment (winrt::apartment_type::multi_threaded); }
     ~ApartmentScope() { winrt::uninit_apartment(); }
 };
+
+// Every capture runs on its own detached worker (WinRT apartment + a blocking
+// frame wait). Bound how many run at once — a client looping `shot` must not spawn
+// unbounded D3D devices/threads — and let the bridge's stop() wait for them.
+constexpr int kMaxConcurrentCaptures = 2;
+
+struct CaptureWorkers
+{
+    std::mutex              mutex;
+    std::condition_variable idle;
+    int                     active = 0;
+};
+
+CaptureWorkers& captureWorkers()
+{
+    static CaptureWorkers workers;
+    return workers;
+}
+
+bool tryBeginWorker()
+{
+    auto& w = captureWorkers();
+    std::lock_guard<std::mutex> lock (w.mutex);
+    if (w.active >= kMaxConcurrentCaptures)
+        return false;
+    ++w.active;
+    return true;
+}
+
+void endWorker()
+{
+    auto& w = captureWorkers();
+    {
+        std::lock_guard<std::mutex> lock (w.mutex);
+        --w.active;
+    }
+    w.idle.notify_all();
+}
 
 juce::String describeHresult (const winrt::hresult_error& error)
 {
@@ -211,19 +253,30 @@ bool writeMappedTextureToPng (ID3D11Device& device,
     }
 
     juce::Image image (juce::Image::ARGB, outputBounds.getWidth(),
-                       outputBounds.getHeight(), true);
+                       outputBounds.getHeight(), false);
     {
+        // The staging texture is B8G8R8A8 — byte-for-byte JUCE's little-endian
+        // PixelARGB layout (B,G,R,A) — so copy whole rows instead of converting
+        // pixel by pixel (setPixelColour costs a call + premultiply per pixel).
         juce::Image::BitmapData pixels (image, juce::Image::BitmapData::writeOnly);
+        const auto rowBytes = (size_t) outputBounds.getWidth() * 4u;
         for (int y = 0; y < outputBounds.getHeight(); ++y)
         {
             const auto* sourceRow = static_cast<const std::uint8_t*> (mapped.pData)
                                   + (size_t) (y + outputBounds.getY()) * mapped.RowPitch
                                   + (size_t) outputBounds.getX() * 4u;
-            for (int x = 0; x < outputBounds.getWidth(); ++x)
+            if (pixels.pixelStride == 4)
             {
-                const auto* bgra = sourceRow + (size_t) x * 4u;
-                pixels.setPixelColour (x, y, juce::Colour::fromRGBA (
-                    bgra[2], bgra[1], bgra[0], bgra[3]));
+                std::memcpy (pixels.getLinePointer (y), sourceRow, rowBytes);
+            }
+            else
+            {
+                for (int x = 0; x < outputBounds.getWidth(); ++x)
+                {
+                    const auto* bgra = sourceRow + (size_t) x * 4u;
+                    pixels.setPixelColour (x, y, juce::Colour::fromRGBA (
+                        bgra[2], bgra[1], bgra[0], bgra[3]));
+                }
             }
         }
     }
@@ -396,12 +449,27 @@ void captureWindowAsync (juce::Component& comp,
                                  clientRect.right - clientRect.left,
                                  clientRect.bottom - clientRect.top };
     request.scale = scale;
-    request.done = std::move (done);
+    request.done = done;
 
-    std::thread ([request = std::move (request)]() mutable
+    if (! tryBeginWorker())
     {
-        runCapture (std::move (request));
-    }).detach();
+        done (false, request.output, "too many captures in progress; retry when one finishes");
+        return;
+    }
+
+    try
+    {
+        std::thread ([request = std::move (request)]() mutable
+        {
+            runCapture (std::move (request));
+            endWorker(); // after runCapture's apartment scope has unwound
+        }).detach();
+    }
+    catch (...)
+    {
+        endWorker();
+        done (false, chooseOutput (target), "could not start a capture worker thread");
+    }
 }
 
 void captureStreamAsync (juce::Component& comp,
@@ -410,12 +478,24 @@ void captureStreamAsync (juce::Component& comp,
                          int durationMs,
                          juce::Rectangle<int> viewportCrop,
                          std::function<void (juce::String, double, int, int)> onFrame,
-                         std::function<void (bool, int, juce::String)> onDone)
+                         std::function<void (bool, int, juce::String)> onDone,
+                         std::function<bool()> shouldStop)
 {
-    // TODO: a persistent Windows.Graphics.Capture frame pool would give frame-rate
-    // capture here; for now the one-shot `shot` op is the Windows capability.
-    juce::ignoreUnused (comp, dir, fps, durationMs, viewportCrop, onFrame);
-    onDone (false, 0, "frame-rate capture is not yet implemented on Windows");
+    // Not implemented: a persistent Windows.Graphics.Capture frame pool would give
+    // frame-rate capture here. connect() does not bind shot_stream on Windows, so
+    // the bridge neither advertises the op nor reaches this stub through it.
+    juce::ignoreUnused (comp, dir, fps, durationMs, viewportCrop, onFrame, shouldStop);
+    onDone (false, 0, "frame-rate capture is not implemented on Windows");
+}
+
+bool streamCaptureOsSupported() { return true; }
+
+void waitForCaptureWorkers (int timeoutMs)
+{
+    auto& w = captureWorkers();
+    std::unique_lock<std::mutex> lock (w.mutex);
+    w.idle.wait_for (lock, std::chrono::milliseconds (juce::jmax (0, timeoutMs)),
+                     [&w] { return w.active == 0; });
 }
 
 } // namespace web_agent::detail

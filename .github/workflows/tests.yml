@@ -10,22 +10,37 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 jobs:
   # Zero-dependency Node suites (client, page helpers, capture script).
   js:
-    runs-on: ubuntu-latest
+    name: js (${{ matrix.os }}, node ${{ matrix.node }})
+    runs-on: ${{ matrix.os }}
     strategy:
-      fail-fast: false # a failure on one Node version must not cancel the other's signal
+      fail-fast: false # a failure on one cell must not cancel the others' signal
       matrix:
-        node: [22, 24] # 22 = the engines floor, 24 = current LTS
+        include:
+          # 22 = the engines floor, 24 = current LTS; windows/macos each get one
+          # Node-24 cell so the suite is proven cross-platform without tripling
+          # the matrix.
+          - os: ubuntu-latest
+            node: 22
+          - os: ubuntu-latest
+            node: 24
+          - os: windows-latest
+            node: 24
+          - os: macos-latest
+            node: 24
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-node@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: ${{ matrix.node }}
       - run: npm test
       - name: Build and type-check the published client
-        if: matrix.node == 24
+        if: matrix.os == 'ubuntu-latest' && matrix.node == 24
         run: |
           npm ci --ignore-scripts
           npm run build
@@ -44,7 +59,7 @@ jobs:
       matrix:
         os: [macos-14, windows-latest, ubuntu-latest]
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Install JUCE Linux deps
         if: runner.os == 'Linux'
@@ -58,7 +73,7 @@ jobs:
       # JUCE + Catch2 are FetchContent'd on first configure — cache the sources
       # so re-runs skip the ~200MB JUCE clone.
       - name: Cache FetchContent deps
-        uses: actions/cache@v5
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: build/test/_deps
           key: deps-${{ runner.os }}-${{ hashFiles('tests/CMakeLists.txt') }}

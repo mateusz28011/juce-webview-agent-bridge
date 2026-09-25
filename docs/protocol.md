@@ -26,27 +26,52 @@ refuses to run and returns 0, rather than accepting unauthenticated clients. An
 embedder can opt into an open, tokenless loopback bridge with
 `start(..., allowUnauthenticatedLoopback: true)`.)
 
+**Auth hardening**, so a stray or hostile loopback connection can't sit around
+consuming resources: a connection that doesn't authenticate within **~5 seconds**
+is closed; **3 failed auth attempts** close the connection; a pre-auth line over
+**~4 KB** is parsed only if it carries the valid `token` as a top-level string
+member (checked before parsing) — any other oversized unauthenticated line closes
+the connection; and JSON nesting deeper than **64 levels** is rejected. Only the
+auth deadline, failure count, and 4 KB rule stop applying once a connection is
+authenticated.
+
 ## Ops
 
-Newline-delimited JSON over TCP. Requests carry an `id`; replies echo it. Every request
-also carries `token` until the connection is authenticated.
+Newline-delimited JSON over TCP. Requests carry an `id`; replies echo it. Until the
+connection is authenticated, every request carries `token` — or, as the bundled
+clients do, the client first sends a small `{"op":"auth","token":"…"}` line and then
+its requests without it. Either works for any request size (see the pre-auth line
+rule above). A client that sends its requests and then half-closes its side (e.g.
+`nc -N`) still receives the replies: the host keeps the connection open for up to
+~30 s (longer for a running `shot_stream`) while replies are outstanding.
 
 | Request | Reply |
 |---|---|
 | `{"op":"auth","token":"…"}` | `{"op":"auth","ok":bool,"error"?}` |
 | `{"id","op":"eval","code":"…"}` | `{"id","op":"eval","ok":bool,"result"?,"error"?}` |
-| `{"id","op":"eval_big","code":"…"}` | `{"id","op":"eval_big","ok",result?,"error"?}` — like `eval` but for large results: the host stringifies the value into a page global and reassembles it from sub-threshold slices, so a >~100KB result doesn't stall WKWebView. One request instead of a client chunk-poll loop. |
+| `{"id","op":"eval_big","code":"…"}` | `{"id","op":"eval_big","ok",result?,"error"?}` — like `eval` but for large results: the host stringifies the value into a page global and reassembles it from sub-threshold slices, so a >~100KB result doesn't stall WKWebView. One request instead of a client chunk-poll loop. `code` must be an **expression** (its value is what gets captured), not a statement or a block. The captured value is converted before being reassembled: `undefined`/`null` become `''`; a `string` is used as-is; anything else is `JSON.stringify`'d. |
 | `{"id","op":"shot","path"?,"rect"?}` | `{"id","op":"shot","ok",path,"error"?}` (PNG written by the host; `rect`={x,y,w,h} CSS px crops to a region) |
-| `{"id","op":"shot_stream","dir"?,"fps"?,"durationMs"?,"rect"?}` | `{"id","op":"shot_stream","ok",dir,count,"error"?}` — frame-rate capture: writes one PNG per frame into `dir` for `durationMs` at ~`fps`, streaming each as a `frame` sink event; the reply carries the final `count`. Persistent SCStream, macOS 14+ only; `rect` crops like `shot`. |
+| `{"id","op":"shot_stream","dir"?,"fps"?,"durationMs"?,"rect"?}` | `{"id","op":"shot_stream","ok",dir,count,"warning"?,"error"?}` — frame-rate capture: writes one PNG per frame into `dir` for `durationMs` at ~`fps`, streaming each as a `frame` sink event; the reply carries the final `count`. Persistent SCStream, **macOS 14+ only** — on other platforms the op is not advertised in `hello.ops` and a request for it replies `SCREENSHOT_UNAVAILABLE`. `rect` crops like `shot`. |
 | `{"id","op":"bounds"}` | `{"id","op":"bounds","ok",x,y,w,h}` (screen coords) |
 | `{"id","op":"ping"}` | `{"id","op":"ping","ok":true}` |
 | `{"id","op":"hello"}` | `{"id","op":"hello","ok",protocolVersion,moduleVersion,ops[],platform,screenshotAvailable,authRequired}` — `moduleVersion` is the host's C++ module version (absent on hosts predating it) |
-| `{"id","op":"layerdebug","enabled"?}` | `{"id","op":"layerdebug","ok",enabled,"error"?}` — toggles WebKit compositing debug overlays (layer borders + repaint counters) on every WKWebView via WKPreferences SPI; macOS only, Debug-only module. Overlays render into the window, so `shot` captures them. |
+| `{"id","op":"layerdebug","enabled"?}` | `{"id","op":"layerdebug","ok",enabled,"error"?}` — toggles WebKit compositing debug overlays (layer borders + repaint counters) on the WKWebView bound by `connect()` (not other WebViews in its window) via WKPreferences SPI; macOS only, Debug-only module. Overlays render into the window, so `shot` captures them. |
 | `{"id","op":"layertree"}` | `{"id","op":"layertree","ok","text"?,"error"?}` — dumps the first WKWebView's UI-process (remote) CALayer tree as text via the `_caLayerTreeAsText` SPI: a programmatic compositing-layer census (count + geometry) with no screenshot needed; macOS only. |
 | `{"id","op":"sink_replay","since"?}` | re-sends buffered `sink` frames with `seq` > `since`, then `{"id","op":"sink_replay","ok",count}` |
 
 Each `"error"?` above is the object defined in **Errors** below — since protocol 2 it is
-no longer a bare string.
+no longer a bare string. A **successful** reply (`"ok":true`) never carries an `error`
+field; `shot_stream` is the one op that may additionally carry a `warning` field on a
+success reply — set when frames were written but stopping the capture stream then
+reported an error — an additive field, not a failure signal.
+
+An unrecognized `op` replies `{"id","op":<the requested op>,"ok":false,"error":{"code":"UNKNOWN_OP",…}}` —
+the reply echoes back whatever op was requested, not a fixed op name, so a client can
+still correlate the failure with the request it sent.
+
+`shot` and `shot_stream` write PNGs to a client-supplied `path`/`dir`. The
+authenticated client can write files anywhere the host process has write access —
+loopback + token is the trust boundary, not the destination path.
 
 ## Errors
 
@@ -101,5 +126,8 @@ A `frame` event (`data: {path, w, h}`) fires per captured frame during a `shot_s
 run — the PNG path plus its pixel size.
 For `net`, `data.kind` is one of `fetch` / `xhr` / `ws` / `sse` / `beacon` / `timing`;
 request/response bodies + headers (and WS/SSE frame bodies) are only included while
-response-body capture is armed (`capture on`). Sink events are broadcast from a
-dedicated writer thread (never the message/GUI thread).
+response-body capture is armed (`capture on`). Sink events are fanned out to
+per-connection outbound queues drained by each connection's write thread (never the
+message/GUI thread); a client that stops reading is disconnected after 5 s without
+progress, and a connection that falls `queueMax` frames behind drops its oldest
+undelivered sink frames.

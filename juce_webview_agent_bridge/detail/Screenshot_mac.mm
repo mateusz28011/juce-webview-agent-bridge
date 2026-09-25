@@ -21,6 +21,19 @@
 #import <ImageIO/ImageIO.h>
 #import <ScreenCaptureKit/ScreenCaptureKit.h>
 
+// "<what>: <description> (domain D code C)" for an NSError; nil-safe, and safe when
+// UTF8String returns NULL.
+static juce::String wabDescribeNSError (NSError* error, const char* what)
+{
+    juce::String out (what);
+    if (error == nil)
+        return out;
+
+    auto utf8 = [] (NSString* s) { const char* p = s != nil ? [s UTF8String] : nullptr; return juce::String::fromUTF8 (p != nullptr ? p : ""); };
+    return out + ": " + utf8 (error.localizedDescription)
+         + " (domain " + utf8 (error.domain) + " code " + juce::String ((int) error.code) + ")";
+}
+
 // SCStreamOutput delegate for shot_stream: writes each captured frame to a PNG and
 // notifies via a C++ callback. Obj-C classes must live at global scope (not inside a
 // C++ namespace); the C++ entry point below is in web_agent::detail. This file is
@@ -30,16 +43,18 @@ API_AVAILABLE(macos(14.0))
 @interface WABStreamOutput : NSObject <SCStreamOutput, SCStreamDelegate>
 - (instancetype) initWithDir: (juce::File) dir
                       cropPx: (juce::Rectangle<int>) cropPx
-                     onFrame: (std::function<void (juce::String, double, int, int)>) onFrame;
+                     onFrame: (std::function<void (juce::String, double, int, int)>) onFrame
+                 onStopError: (std::function<void (juce::String)>) onStopError;
 - (int) frameCount;
 @end
 
 @implementation WABStreamOutput
 {
     std::function<void (juce::String, double, int, int)> _onFrame;
+    std::function<void (juce::String)>                   _onStopError;
     juce::File           _dir;
     juce::Rectangle<int> _cropPx;   // device-px crop; empty = whole frame
-    std::atomic<int>     _count;
+    std::atomic<int>     _count;    // frames successfully WRITTEN (not merely received)
     CFAbsoluteTime       _t0;
     CIContext*           _ci;
 }
@@ -47,12 +62,14 @@ API_AVAILABLE(macos(14.0))
 - (instancetype) initWithDir: (juce::File) dir
                       cropPx: (juce::Rectangle<int>) cropPx
                      onFrame: (std::function<void (juce::String, double, int, int)>) onFrame
+                 onStopError: (std::function<void (juce::String)>) onStopError
 {
     if (self = [super init])
     {
         _dir = dir;
         _cropPx = cropPx;
         _onFrame = std::move (onFrame);
+        _onStopError = std::move (onStopError);
         _count.store (0);
         _t0 = CFAbsoluteTimeGetCurrent();
         _ci = [[CIContext alloc] init];
@@ -63,6 +80,14 @@ API_AVAILABLE(macos(14.0))
 - (void) dealloc { [_ci release]; [super dealloc]; }
 
 - (int) frameCount { return _count.load(); }
+
+// SCStreamDelegate: the stream died on its own (window closed, permission revoked…).
+- (void) stream: (SCStream*) stream didStopWithError: (NSError*) error
+{
+    juce::ignoreUnused (stream);
+    if (_onStopError)
+        _onStopError (wabDescribeNSError (error, "capture stream stopped"));
+}
 
 - (void) stream: (SCStream*) stream
     didOutputSampleBuffer: (CMSampleBufferRef) sampleBuffer
@@ -94,7 +119,9 @@ API_AVAILABLE(macos(14.0))
             toWrite = cropped;
     }
 
-    const int      idx = _count.fetch_add (1);
+    // The sample-handler queue is serial, so read-then-publish is race-free; the
+    // count only advances once the PNG is really on disk.
+    const int      idx = _count.load();
     const juce::File f  = _dir.getChildFile ("frame-" + juce::String (idx).paddedLeft ('0', 6) + ".png");
     NSString*      path = [NSString stringWithUTF8String: f.getFullPathName().toRawUTF8()];
 
@@ -118,7 +145,10 @@ API_AVAILABLE(macos(14.0))
     CGImageRelease (full);
 
     if (ok)
+    {
+        _count.store (idx + 1);
         _onFrame (f.getFullPathName(), CFAbsoluteTimeGetCurrent() - _t0, w, h);
+    }
 }
 @end
 
@@ -141,6 +171,49 @@ bool writeCGImageToPNG (CGImageRef image, NSString* path)
 }
 
 NSString* toNS (const juce::String& s) { return [NSString stringWithUTF8String: s.toRawUTF8()]; }
+
+// Native window geometry for `comp`, read on the message thread (capture completions
+// run on background queues, where touching juce::Component / AppKit is unsafe).
+struct WindowGeometry
+{
+    CGWindowID           windowID    = 0;
+    CGFloat              scale       = 1.0;
+    double               titleBarPts = 0.0;
+    double               frameHpts   = 0.0;
+    double               contentHpts = 0.0;
+    juce::Rectangle<int> compInTop;          // comp within its top-level component, logical pts
+};
+
+bool readWindowGeometry (juce::Component& comp, WindowGeometry& g, juce::String& error)
+{
+    auto* top  = comp.getTopLevelComponent();
+    auto* host = top != nullptr ? top : &comp;
+    auto* peer = host->getPeer();
+    if (peer == nullptr) { error = "no native peer"; return false; }
+
+    NSView*   view = (NSView*) peer->getNativeHandle();
+    NSWindow* win  = [view window];
+    if (win == nil) { error = "no native window"; return false; }
+
+    const NSRect frameRect   = [win frame];
+    const NSRect contentRect = [win contentRectForFrameRect: frameRect];
+    g.windowID    = (CGWindowID) [win windowNumber];
+    g.scale       = [win backingScaleFactor];
+    g.frameHpts   = frameRect.size.height;
+    g.contentHpts = contentRect.size.height;
+    g.titleBarPts = g.frameHpts - g.contentHpts;
+    g.compInTop   = host->getLocalArea (&comp, comp.getLocalBounds());
+    return true;
+}
+
+API_AVAILABLE(macos(14.0))
+SCWindow* findWindow (SCShareableContent* content, CGWindowID windowID)
+{
+    for (SCWindow* w in content.windows)
+        if (w.windowID == windowID)
+            return w;
+    return nil;
+}
 } // namespace
 
 void captureWindowAsync (juce::Component& comp,
@@ -148,13 +221,9 @@ void captureWindowAsync (juce::Component& comp,
                          juce::Rectangle<int> viewportCrop,
                          std::function<void (bool, juce::File, juce::String)> done)
 {
-    auto* top  = comp.getTopLevelComponent();
-    auto* peer = (top != nullptr ? top : &comp)->getPeer();
-    if (peer == nullptr) { done (false, target, "no native peer"); return; }
-
-    NSView*   view = (NSView*) peer->getNativeHandle();
-    NSWindow* win  = [view window];
-    if (win == nil) { done (false, target, "no native window"); return; }
+    WindowGeometry g;
+    juce::String   geometryError;
+    if (! readWindowGeometry (comp, g, geometryError)) { done (false, target, geometryError); return; }
 
     juce::File out = target;
     if (out == juce::File())
@@ -164,21 +233,7 @@ void captureWindowAsync (juce::Component& comp,
     NSString* path = toNS (out.getFullPathName());
     if (path == nil) { done (false, out, "invalid path encoding"); return; }
 
-    const CGWindowID targetID = (CGWindowID) [win windowNumber];
-    const CGFloat    scale    = [win backingScaleFactor];
-
-    // Crop geometry — computed NOW, on the message thread, since the capture
-    // completion runs on a background thread where touching juce::Component (or
-    // AppKit window state) would be unsafe. Title-bar height lets us place the
-    // component within a full-window capture; we re-measure below in case SCK
-    // hands back just the content area.
-    const NSRect frameRect   = [win frame];
-    const NSRect contentRect = [win contentRectForFrameRect: frameRect];
-    const double titleBarPts = frameRect.size.height - contentRect.size.height;
-    const double frameHpts   = frameRect.size.height;
-    const double contentHpts = contentRect.size.height;
-    const juce::Rectangle<int> compInTop = (top != nullptr ? top : &comp)->getLocalArea (&comp, comp.getLocalBounds());
-    const juce::Rectangle<int> cropReq   = viewportCrop;
+    const juce::Rectangle<int> cropReq = viewportCrop;
 
     if (@available (macOS 14.0, *))
     {
@@ -189,24 +244,18 @@ void captureWindowAsync (juce::Component& comp,
         {
             if (error != nil || content == nil)
             {
-                const juce::String detail = error != nil
-                    ? juce::String ("SCShareableContent failed: ") + juce::String::fromUTF8 ([error.localizedDescription UTF8String])
-                          + " (domain " + juce::String::fromUTF8 ([error.domain UTF8String]) + " code " + juce::String ((int) error.code) + ")"
-                    : juce::String ("SCShareableContent returned no content");
-                done (false, out, detail);
+                done (false, out, error != nil ? wabDescribeNSError (error, "SCShareableContent failed")
+                                               : juce::String ("SCShareableContent returned no content"));
                 return;
             }
 
-            SCWindow* match = nil;
-            for (SCWindow* w in content.windows)
-                if (w.windowID == targetID) { match = w; break; }
-
+            SCWindow* match = findWindow (content, g.windowID);
             if (match == nil) { done (false, out, "window not found (Screen Recording permission?)"); return; }
 
             SCContentFilter* filter = [[SCContentFilter alloc] initWithDesktopIndependentWindow: match];
             SCStreamConfiguration* cfg = [[SCStreamConfiguration alloc] init];
-            cfg.width       = (size_t) (match.frame.size.width  * scale);
-            cfg.height      = (size_t) (match.frame.size.height * scale);
+            cfg.width       = (size_t) (match.frame.size.width  * g.scale);
+            cfg.height      = (size_t) (match.frame.size.height * g.scale);
             cfg.showsCursor = NO;
 
             [SCScreenshotManager
@@ -214,7 +263,7 @@ void captureWindowAsync (juce::Component& comp,
                          configuration: cfg
                      completionHandler: ^(CGImageRef img, NSError* e2)
             {
-                if (e2 != nil || img == nullptr) { done (false, out, "captureImage failed"); return; }
+                if (e2 != nil || img == nullptr) { done (false, out, wabDescribeNSError (e2, "captureImage failed")); return; }
 
                 CGImageRef toWrite = img;
                 CGImageRef cropped = nullptr;
@@ -227,17 +276,17 @@ void captureWindowAsync (juce::Component& comp,
                     // Whole frame (incl. title bar) or content-only? Pick the offset
                     // that matches what was actually captured, so the crop lands right
                     // regardless of SCK's behaviour.
-                    const double framePxH   = frameHpts   * (double) scale;
-                    const double contentPxH = contentHpts * (double) scale;
+                    const double framePxH   = g.frameHpts   * (double) g.scale;
+                    const double contentPxH = g.contentHpts * (double) g.scale;
                     const double tbPts = (std::abs ((double) imgH - framePxH) <= std::abs ((double) imgH - contentPxH))
-                                             ? titleBarPts : 0.0;
+                                             ? g.titleBarPts : 0.0;
 
-                    const juce::Rectangle<float> compInImg ((float) compInTop.getX(),
-                                                            (float) compInTop.getY() + (float) tbPts,
-                                                            (float) compInTop.getWidth(),
-                                                            (float) compInTop.getHeight());
+                    const juce::Rectangle<float> compInImg ((float) g.compInTop.getX(),
+                                                            (float) g.compInTop.getY() + (float) tbPts,
+                                                            (float) g.compInTop.getWidth(),
+                                                            (float) g.compInTop.getHeight());
 
-                    const auto px = computeCropPx ({ 0, 0, imgW, imgH }, compInImg, cropReq, (double) scale);
+                    const auto px = computeCropPx ({ 0, 0, imgW, imgH }, compInImg, cropReq, (double) g.scale);
                     if (! px.isEmpty())
                         cropped = CGImageCreateWithImageInRect (img, CGRectMake (px.getX(), px.getY(), px.getWidth(), px.getHeight()));
                     if (cropped != nullptr)
@@ -265,26 +314,37 @@ void captureStreamAsync (juce::Component& comp,
                          int durationMs,
                          juce::Rectangle<int> viewportCrop,
                          std::function<void (juce::String, double, int, int)> onFrame,
-                         std::function<void (bool, int, juce::String)> onDone)
+                         std::function<void (bool, int, juce::String)> onDone,
+                         std::function<bool()> shouldStop)
 {
-    auto* top  = comp.getTopLevelComponent();
-    auto* peer = (top != nullptr ? top : &comp)->getPeer();
-    if (peer == nullptr) { onDone (false, 0, "no native peer"); return; }
-
-    NSView*   view = (NSView*) peer->getNativeHandle();
-    NSWindow* win  = [view window];
-    if (win == nil) { onDone (false, 0, "no native window"); return; }
+    WindowGeometry g;
+    juce::String   geometryError;
+    if (! readWindowGeometry (comp, g, geometryError)) { onDone (false, 0, geometryError); return; }
 
     dir.createDirectory();
 
-    const CGWindowID targetID    = (CGWindowID) [win windowNumber];
-    const CGFloat    scale       = [win backingScaleFactor];
-    const NSRect     frameRect   = [win frame];
-    const NSRect     contentRect = [win contentRectForFrameRect: frameRect];
-    const double     titleBarPts = frameRect.size.height - contentRect.size.height;
-    const juce::Rectangle<int> compInTop = (top != nullptr ? top : &comp)->getLocalArea (&comp, comp.getLocalBounds());
-    const juce::Rectangle<int> cropReq   = viewportCrop;
-    const int fpsClamped = juce::jlimit (1, 120, fps);
+    const juce::Rectangle<int> cropReq    = viewportCrop;
+    const int                  fpsClamped = juce::jlimit (1, 120, fps);
+
+    // One stream run: onDone must fire exactly once, but the stop timer, the
+    // delegate's didStopWithError and the error paths can all race to finish it.
+    struct Run
+    {
+        std::function<void (bool, int, juce::String)> onDone;
+        std::atomic<bool> finished     { false };
+        std::atomic<bool> stopping     { false };
+        std::atomic<bool> streamFailed { false };
+        std::mutex        failureMutex;
+        juce::String      failure;
+
+        void finish (bool ok, int count, const juce::String& error)
+        {
+            if (! finished.exchange (true))
+                onDone (ok, count, error);
+        }
+    };
+    auto run = std::make_shared<Run>();
+    run->onDone = std::move (onDone);
 
     if (@available (macOS 14.0, *))
     {
@@ -293,26 +353,24 @@ void captureStreamAsync (juce::Component& comp,
                               onScreenWindowsOnly: YES
                                 completionHandler: ^(SCShareableContent* content, NSError* error)
         {
-            if (error != nil || content == nil) { onDone (false, 0, "SCShareableContent failed"); return; }
+            if (error != nil || content == nil) { run->finish (false, 0, wabDescribeNSError (error, "SCShareableContent failed")); return; }
 
-            SCWindow* match = nil;
-            for (SCWindow* w in content.windows)
-                if (w.windowID == targetID) { match = w; break; }
-            if (match == nil) { onDone (false, 0, "window not found (Screen Recording permission?)"); return; }
+            SCWindow* match = findWindow (content, g.windowID);
+            if (match == nil) { run->finish (false, 0, "window not found (Screen Recording permission?)"); return; }
 
-            const size_t imgW = (size_t) (match.frame.size.width  * scale);
-            const size_t imgH = (size_t) (match.frame.size.height * scale);
+            const size_t imgW = (size_t) (match.frame.size.width  * g.scale);
+            const size_t imgH = (size_t) (match.frame.size.height * g.scale);
 
             // The stream config fixes the frame size, so the device-px crop is the
             // same for every frame — compute it once (full window incl. title bar).
             juce::Rectangle<int> cropPx;
             if (! cropReq.isEmpty())
             {
-                const juce::Rectangle<float> compInImg ((float) compInTop.getX(),
-                                                        (float) compInTop.getY() + (float) titleBarPts,
-                                                        (float) compInTop.getWidth(),
-                                                        (float) compInTop.getHeight());
-                cropPx = computeCropPx ({ 0, 0, (int) imgW, (int) imgH }, compInImg, cropReq, (double) scale);
+                const juce::Rectangle<float> compInImg ((float) g.compInTop.getX(),
+                                                        (float) g.compInTop.getY() + (float) g.titleBarPts,
+                                                        (float) g.compInTop.getWidth(),
+                                                        (float) g.compInTop.getHeight());
+                cropPx = computeCropPx ({ 0, 0, (int) imgW, (int) imgH }, compInImg, cropReq, (double) g.scale);
             }
 
             SCContentFilter*       filter = [[SCContentFilter alloc] initWithDesktopIndependentWindow: match];
@@ -324,40 +382,124 @@ void captureStreamAsync (juce::Component& comp,
             cfg.pixelFormat          = kCVPixelFormatType_32BGRA;
             cfg.queueDepth           = 6;
 
-            WABStreamOutput* output = [[WABStreamOutput alloc] initWithDir: dir cropPx: cropPx onFrame: onFrame];
+            WABStreamOutput* output = [[WABStreamOutput alloc] initWithDir: dir
+                                                                    cropPx: cropPx
+                                                                   onFrame: onFrame
+                                                               onStopError: [run] (juce::String why)
+                                                                            {
+                                                                                {
+                                                                                    std::lock_guard<std::mutex> lk (run->failureMutex);
+                                                                                    run->failure = why;
+                                                                                }
+                                                                                run->streamFailed.store (true);
+                                                                            }];
             SCStream*        stream = [[SCStream alloc] initWithFilter: filter configuration: cfg delegate: output];
 
             [filter release];
             [cfg release];
 
+            // MRC: the queue, stream and output are released together once the run
+            // is over (every exit path below).
             dispatch_queue_t frameQ = dispatch_queue_create ("web_agent.shot_stream", DISPATCH_QUEUE_SERIAL);
             NSError* addErr = nil;
-            [stream addStreamOutput: output type: SCStreamOutputTypeScreen sampleHandlerQueue: frameQ error: &addErr];
-            if (addErr != nil) { [stream release]; [output release]; onDone (false, 0, "addStreamOutput failed"); return; }
+            if (! [stream addStreamOutput: output type: SCStreamOutputTypeScreen sampleHandlerQueue: frameQ error: &addErr])
+            {
+                [stream release];
+                [output release];
+                dispatch_release (frameQ);
+                run->finish (false, 0, wabDescribeNSError (addErr, "addStreamOutput failed"));
+                return;
+            }
 
             [stream startCaptureWithCompletionHandler: ^(NSError* startErr)
             {
-                if (startErr != nil) { [stream release]; [output release]; onDone (false, 0, "startCapture failed"); return; }
+                if (startErr != nil)
+                {
+                    [stream release];
+                    [output release];
+                    dispatch_release (frameQ);
+                    run->finish (false, 0, wabDescribeNSError (startErr, "startCapture failed"));
+                    return;
+                }
 
-                // Run for durationMs, then stop and report how many frames landed.
-                dispatch_after (dispatch_time (DISPATCH_TIME_NOW, (int64_t) durationMs * (int64_t) NSEC_PER_MSEC),
-                                dispatch_get_main_queue(), ^{
+                // Poll (off the main queue, so a bridge stop() waiting on the message
+                // thread can't deadlock it) until the duration elapses, the bridge
+                // cancels, or the stream dies on its own.
+                const double t0 = juce::Time::getMillisecondCounterHiRes();
+                dispatch_source_t timer = dispatch_source_create (DISPATCH_SOURCE_TYPE_TIMER, 0, 0,
+                                                                  dispatch_get_global_queue (QOS_CLASS_UTILITY, 0));
+                if (timer == nullptr)
+                {
+                    [stream stopCaptureWithCompletionHandler: ^(NSError*)
+                    {
+                        const int count = [output frameCount];
+                        [stream release];
+                        [output release];
+                        dispatch_release (frameQ);
+                        run->finish (false, count, "could not create the stream timer");
+                    }];
+                    return;
+                }
+
+                dispatch_source_set_timer (timer, dispatch_time (DISPATCH_TIME_NOW, 20 * (int64_t) NSEC_PER_MSEC),
+                                           20 * NSEC_PER_MSEC, 5 * NSEC_PER_MSEC);
+                dispatch_source_set_event_handler (timer, ^{
+                    const bool failed    = run->streamFailed.load();
+                    const bool cancelled = shouldStop != nullptr && shouldStop();
+                    const bool elapsed   = juce::Time::getMillisecondCounterHiRes() - t0 >= (double) durationMs;
+                    if (! (failed || cancelled || elapsed) || run->stopping.exchange (true))
+                        return;
+
+                    dispatch_source_cancel (timer);
+
+                    if (failed) // already stopped by SCK: nothing to stop, just report
+                    {
+                        const int count = [output frameCount];
+                        [stream release];
+                        [output release];
+                        dispatch_release (frameQ);
+                        juce::String why;
+                        {
+                            std::lock_guard<std::mutex> lk (run->failureMutex);
+                            why = run->failure;
+                        }
+                        run->finish (false, count, why);
+                        return;
+                    }
+
                     [stream stopCaptureWithCompletionHandler: ^(NSError* stopErr)
                     {
                         const int count = [output frameCount];
                         [stream release];
                         [output release];
-                        onDone (true, count, stopErr != nil ? juce::String ("stopCapture warning") : juce::String());
+                        dispatch_release (frameQ);
+                        if (cancelled)
+                            run->finish (false, count, "stream cancelled: the bridge is stopping");
+                        else // frames are on disk; a stop hiccup is only a warning
+                            run->finish (true, count, stopErr != nil ? wabDescribeNSError (stopErr, "stopCapture warning")
+                                                                     : juce::String());
                     }];
                 });
+                dispatch_source_set_cancel_handler (timer, ^{ dispatch_release (timer); });
+                dispatch_resume (timer);
             }];
         }];
     }
     else
     {
-        onDone (false, 0, "ScreenCaptureKit streaming requires macOS 14+");
+        run->finish (false, 0, "ScreenCaptureKit streaming requires macOS 14+");
     }
 }
+
+// Captures run on ScreenCaptureKit's own queues; the bridge tracks them per request.
+bool streamCaptureOsSupported()
+{
+    if (@available (macOS 14.0, *))
+        return true;
+    return false;
+}
+
+void waitForCaptureWorkers (int) {}
 
 } // namespace web_agent::detail
 

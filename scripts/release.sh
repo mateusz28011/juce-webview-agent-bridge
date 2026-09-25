@@ -54,12 +54,21 @@ case "${bump}" in
       const b = '${bump}';
       console.log(b === 'major' ? \`\${ma + 1}.0.0\` : b === 'minor' ? \`\${ma}.\${mi + 1}.0\` : \`\${ma}.\${mi}.\${pa + 1}\`);
     ")" ;;
-  [0-9]*.[0-9]*.[0-9]*)
-    new="${bump}" ;;
   *)
-    echo "Usage: scripts/release.sh patch|minor|major|X.Y.Z   (current: v${current})" >&2
-    exit 1 ;;
+    if [[ "${bump}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+      new="${bump}"
+    else
+      echo "Usage: scripts/release.sh patch|minor|major|X.Y.Z   (current: v${current})" >&2
+      exit 1
+    fi ;;
 esac
+node -e "
+  const [ca, cb, cc] = '${current}'.split('.').map(Number);
+  const [na, nb, nc] = '${new}'.split('.').map(Number);
+  const cur = ca * 1e6 + cb * 1e3 + cc;
+  const nw  = na * 1e6 + nb * 1e3 + nc;
+  if (nw <= cur) process.exit(1);
+" || { echo "✗ ${new} is not greater than the current version ${current}." >&2; exit 1; }
 tag="v${new}"
 if git rev-parse -q --verify "refs/tags/${tag}" >/dev/null; then
   echo "✗ Tag ${tag} already exists." >&2
@@ -117,15 +126,28 @@ rm -f juce_webview_agent_bridge/juce_webview_agent_bridge.h.bak tests/CMakeLists
 grep -q "version:            ${new}" juce_webview_agent_bridge/juce_webview_agent_bridge.h
 grep -q "#define WEB_AGENT_BRIDGE_VERSION \"${new}\"" juce_webview_agent_bridge/juce_webview_agent_bridge.h
 grep -q "VERSION ${new}" tests/CMakeLists.txt
-grep -q "GIT_TAG        ${tag}" README.md
+grep -qE "GIT_TAG +${tag}" README.md
 node -e "const p=require('./package-lock.json'); if(p.version!=='${new}' || p.packages[''].version!=='${new}') process.exit(1)"
 
 # --- verify, commit, tag ----------------------------------------------------------
-npm ci --ignore-scripts >/dev/null 2>&1
-npm run build >/dev/null 2>&1 || { echo '✗ TypeScript build failed — aborting (tree left bumped for inspection).' >&2; exit 1; }
-npm test >/dev/null 2>&1 || { echo '✗ npm test failed — aborting (tree left bumped for inspection).' >&2; exit 1; }
-npm run test:types >/dev/null 2>&1 || { echo '✗ public TypeScript API check failed — aborting (tree left bumped for inspection).' >&2; exit 1; }
-npm pack --dry-run >/dev/null 2>&1 || { echo '✗ npm package dry-run failed — aborting (tree left bumped for inspection).' >&2; exit 1; }
+# Each step's output is captured to a log instead of swallowed, so a failure here
+# (tree left bumped for inspection) can actually be diagnosed instead of just
+# reported as "something failed".
+step_log="$(mktemp)"
+trap 'rm -f "${step_log}"' EXIT
+run_step() {
+  local desc="$1"; shift
+  if ! "$@" >"${step_log}" 2>&1; then
+    echo "✗ ${desc} — aborting (tree left bumped for inspection). Output:" >&2
+    cat "${step_log}" >&2
+    exit 1
+  fi
+}
+run_step "npm ci failed" npm ci --ignore-scripts
+run_step "TypeScript build failed" npm run build
+run_step "npm test failed" npm test
+run_step "public TypeScript API check failed" npm run test:types
+run_step "npm package dry-run failed" npm pack --dry-run
 git add package.json package-lock.json juce_webview_agent_bridge/juce_webview_agent_bridge.h tests/CMakeLists.txt README.md tools
 git commit -m "chore(release): ${tag}"
 git tag -a "${tag}" -m "${tag}"
