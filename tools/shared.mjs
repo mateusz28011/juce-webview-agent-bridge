@@ -18,10 +18,26 @@ function readDiscoveryFile(p) {
         return null;
     }
 }
+/** True unless `pid` is known to be gone. `kill(pid, 0)` probes existence without
+ *  signalling: ESRCH = no such process; EPERM = it exists but belongs to someone
+ *  else (still alive). Anything unexpected counts as alive — never hide a live host. */
+function pidAlive(pid) {
+    if (typeof pid !== 'number' || !Number.isInteger(pid) || pid <= 0)
+        return true; // no identity to check
+    try {
+        process.kill(pid, 0);
+        return true;
+    }
+    catch (e) {
+        return e.code !== 'ESRCH';
+    }
+}
 /** Enumerate every registered bridge instance — the per-port files under
  *  `<home>/.web_agent_bridge.d`, sorted by port. Each entry is the full discovery
  *  record (`{port, token, pid, processName, startedAt, label?}`), so a client can
- *  present a readable instance list instead of blindly picking the lowest port. */
+ *  present a readable instance list instead of blindly picking the lowest port.
+ *  Records whose `pid` no longer exists (a host that crashed without removing its
+ *  file) are skipped, so a stale file is never picked over a live instance. */
 export function listInstances() {
     const dir = path.join(os.homedir(), '.web_agent_bridge.d');
     try {
@@ -29,6 +45,7 @@ export function listInstances() {
             .filter((f) => f.endsWith('.json'))
             .map((f) => readDiscoveryFile(path.join(dir, f)))
             .filter((d) => d !== null && typeof d.port === 'number')
+            .filter((d) => pidAlive(d.pid))
             .sort((a, b) => a.port - b.port);
     }
     catch {
@@ -136,49 +153,93 @@ export function requireOp(caps, op, api) {
  *  The host writes them on start so clients never guess: each instance registers
  *  <home>/.web_agent_bridge.d/<port>.json (so several hosts — e.g. multiple
  *  plugin instances in a DAW — don't clobber each other), plus the single legacy
- *  <home>/.web_agent_bridge.json for older single-instance hosts. Enumerate the
- *  registry and pick the requested port (or the lowest), then fall back to the
- *  legacy file. Returns {} when nothing is found. */
+ *  <home>/.web_agent_bridge.json for older single-instance hosts.
+ *
+ *  With `preferredPort`, ONLY a record for that port is returned (its per-port
+ *  file, else the legacy file when it names that port), otherwise {} — never
+ *  another instance's record, whose token would be presented to the wrong host.
+ *  Without it, the lowest-port live instance wins, then the legacy file.
+ *  Returns {} when nothing is found. */
 export function loadDiscovery(preferredPort) {
     const home = os.homedir();
-    const dir = path.join(home, '.web_agent_bridge.d');
+    const legacy = () => readDiscoveryFile(path.join(home, '.web_agent_bridge.json'));
     if (preferredPort) {
-        const d = readDiscoveryFile(path.join(dir, `${preferredPort}.json`));
-        if (d)
+        const d = readDiscoveryFile(path.join(home, '.web_agent_bridge.d', `${preferredPort}.json`));
+        if (d && (d.port === undefined || d.port === preferredPort))
             return d;
+        const l = legacy();
+        return l && l.port === preferredPort ? l : {};
     }
     const insts = listInstances();
-    if (preferredPort) {
-        const m = insts.find((d) => d.port === preferredPort);
-        if (m)
-            return m;
-    }
     if (insts.length)
         return insts[0];
-    return readDiscoveryFile(path.join(home, '.web_agent_bridge.json')) || {};
+    return legacy() || {};
 }
+/** The default cap on one NDJSON line (characters). A reply larger than this is a
+ *  broken or hostile peer, not a result: the reader errors instead of buffering
+ *  without bound. eval_big replies are the largest legitimate lines. */
+export const MAX_JSON_LINE = 64 * 1024 * 1024;
 /** Attach an NDJSON reader to a socket: reassembles newline-delimited JSON
  *  lines across TCP chunks (multi-byte-safe via StringDecoder) and calls fn
- *  with each parsed message. Unparseable or blank lines are skipped. */
-export function onJsonLines(sock, fn) {
-    let acc = '';
+ *  with each parsed message. Blank lines are skipped; an unparseable line or one
+ *  over `maxLineLength` goes to `onError` (see JsonLinesOptions). Each byte is
+ *  scanned for a newline once, so a large reply split into many chunks stays linear. */
+export function onJsonLines(sock, fn, { onError, maxLineLength = MAX_JSON_LINE } = {}) {
+    let parts = [];
+    let pending = 0;
+    let dead = false;
     const dec = new StringDecoder('utf8');
-    sock.on('data', (d) => {
-        acc += dec.write(d);
-        let nl;
-        while ((nl = acc.indexOf('\n')) >= 0) {
-            const line = acc.slice(0, nl);
-            acc = acc.slice(nl + 1);
-            if (!line.trim())
-                continue;
-            let m;
-            try {
-                m = JSON.parse(line);
-            }
-            catch {
-                continue;
-            }
+    const deliver = (line) => {
+        if (!line.trim())
+            return;
+        let m;
+        try {
+            m = JSON.parse(line);
+        }
+        catch (e) {
+            if (!onError)
+                return;
+            const err = new Error(`unparseable bridge line: ${e instanceof Error ? e.message : String(e)}`);
+            err.line = line.length > 200 ? line.slice(0, 200) + '…' : line;
+            const id = /"id"\s*:\s*(-?\d+)/.exec(line);
+            if (id)
+                err.id = Number(id[1]);
+            onError(err);
+            return;
+        }
+        if (m && typeof m === 'object' && !Array.isArray(m))
             fn(m);
+    };
+    sock.on('data', (d) => {
+        if (dead)
+            return;
+        const s = dec.write(d);
+        let start = 0, nl;
+        while ((nl = s.indexOf('\n', start)) >= 0) {
+            parts.push(s.slice(start, nl));
+            const line = parts.length === 1 ? parts[0] : parts.join('');
+            parts = [];
+            pending = 0;
+            start = nl + 1;
+            deliver(line);
+            if (dead)
+                return;
+        }
+        if (start < s.length) {
+            parts.push(s.slice(start));
+            pending += s.length - start;
+            if (pending > maxLineLength) {
+                dead = true;
+                parts = [];
+                pending = 0;
+                const err = new Error(`bridge line exceeds ${maxLineLength} characters; dropping the connection`);
+                try {
+                    onError?.(err);
+                }
+                finally {
+                    sock.destroy?.(err);
+                }
+            }
         }
     });
 }

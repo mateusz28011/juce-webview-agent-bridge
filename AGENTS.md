@@ -11,7 +11,8 @@ limits, screenshot/TCC setup) — this file is the working map.
   module ID and the master header name (`juce_webview_agent_bridge.h`) — a JUCE Module
   Format rule; that's why the module is nested instead of being the repo root.
   - `detail/WebAgentBridge.{h,cpp}` — loopback server: auth gate, op dispatch
-    (eval/bounds/shot/hello/sink_replay), sink writer thread, discovery files.
+    (eval/eval_big/bounds/shot/shot_stream/hello/sink_replay), per-connection
+    read + write threads with outbound queues, discovery files.
   - `detail/CaptureScript.h` — page-side capture (console/error/fetch/XHR/WS/
     SSE/beacon/timing), injected via `withUserScript`. Everything in it is
     deliberately fail-silent — it must never break the host page.
@@ -22,7 +23,8 @@ limits, screenshot/TCC setup) — this file is the working map.
   shared transport. `npm run build` emits the committed, zero-runtime-dependency
   `.mjs` clients and `.d.mts` declarations under `tools/`.
 - `tools/web-agent.mjs` — generated one-shot CLI (`ping|hello|eval|dom|click|fill|capture|
-  backlog|logs|shot`), auto-discovers `{port,token}` from `~/.web_agent_bridge.json`.
+  backlog|logs|shot|layerdebug|layertree|instances`), auto-discovers `{port,token}` from
+  `~/.web_agent_bridge.json`.
 - `tools/shared.mjs` — generated SSOT for what both clients must agree on: `loadDiscovery`,
   `onJsonLines` NDJSON framing, `DEFAULT_PORT`.
 - `tools/e2e.mjs` — generated Playwright-style client over the `eval` op (locators,
@@ -67,9 +69,11 @@ Linux.
   new ops in the `hello` reply); breaking changes bump `protocolVersion`.
 - **Threading (C++):** `evaluateJavascript` and bounds run on the message thread
   (marshalled via `callAsync` + weak_ptr). Screenshot geometry is read there, while
-  Windows capture/PNG encoding completes on a worker; sink broadcast runs on
-  a dedicated writer thread, never the message thread; socket writes are
-  serialized against close via `writeMutex`. Preserve these invariants.
+  Windows capture/PNG encoding completes on a worker. The message thread never
+  touches a socket: replies and sink frames are enqueued onto each connection's
+  outbound queue and drained by that connection's write thread (5 s no-progress
+  deadline, so a non-reading peer can't wedge the host). Teardown is
+  `shutdown` → join read thread → join write thread → close. Preserve these invariants.
 - **Version lives in 6 places** (package.json, package-lock.json, module declaration,
   the `WEB_AGENT_BRIDGE_VERSION` macro the `hello` reply reports, tests CMake,
   README `GIT_TAG` pin) — never bump by hand; `scripts/release.sh` is the owner.

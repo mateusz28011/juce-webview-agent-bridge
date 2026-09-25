@@ -32,18 +32,21 @@
 namespace web_agent::detail
 {
 
-/** Toggle compositing borders + repaint counters on every WKWebView in this
-    app's windows. MUST be called on the message thread. Returns true if at
-    least one WKWebView was found and the SPI selectors were available. */
-bool setCompositingDebugOverlays (bool enabled);
+/** Toggle compositing borders + repaint counters on the WKWebView(s) owned by
+    `scope` itself — found through `scope`'s NSViewComponent children, not its
+    window (the bridge passes the WebView connect() bound, so other WebViews in
+    the same window, other windows, and other plugin instances are never touched). MUST
+    be called on the message thread. Returns true if at least one WKWebView was
+    found and the SPI selectors were available; false for a null scope. */
+bool setCompositingDebugOverlays (juce::Component* scope, bool enabled);
 
-/** Dump the first WKWebView's UI-process CALayer tree as text via the
-    `_caLayerTreeAsText` SPI (a machine-readable census of the remote layer
+/** Dump the UI-process CALayer tree of the first WKWebView owned by `scope`
+    (as above) as text via the `_caLayerTreeAsText` SPI (a machine-readable census of the remote layer
     tree: one entry per compositing layer with geometry — the programmatic
     counterpart of the visual overlays above). MUST be called on the message
     thread. Returns an empty string when no WKWebView is found or the SPI is
     unavailable (non-mac backend, renamed selector). */
-std::string getCaLayerTreeAsText();
+std::string getCaLayerTreeAsText (juce::Component* scope);
 
 } // namespace web_agent::detail
 

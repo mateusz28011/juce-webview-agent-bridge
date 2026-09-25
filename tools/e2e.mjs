@@ -34,6 +34,15 @@ import path from 'node:path';
 import { BridgeOpError, DEFAULT_PORT, assertProtocolSupported, loadDiscovery, onJsonLines, parseHello, requireOp } from './shared.mjs';
 export { BridgeOpError } from './shared.mjs';
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+let readBigSeq = 0;
+/** Minimum per-probe request timeout, so the last probe before a deadline still
+    gets a realistic round-trip instead of an instant self-inflicted timeout. */
+const PROBE_FLOOR_MS = 200;
+// JSON-read a small page expression. Parenthesized so `a || b` / `a, b` stay one
+// operand (bare `a || b ?? null` is a SyntaxError); `?? 'null'` covers values
+// JSON.stringify drops (functions/undefined) — an undefined eval result hangs WKWebView.
+// Newlines around the operand keep a trailing `// comment` from swallowing the rest.
+const jsonExpr = (expr) => `(JSON.stringify((\n${expr}\n) ?? null) ?? 'null')`;
 /** Bring the host app's window to the foreground (macOS, best-effort; resolves
  *  false elsewhere). A backgrounded WebView reports document.hidden === true and
  *  many apps pause timers/polling/state-sync — an agent then reads stale or empty
@@ -99,8 +108,13 @@ export const PAGE_HELPERS = `(() => {
     try {
       if (sel.indexOf('text=') === 0) {
         const t = sel.slice(5).trim();
-        return Array.prototype.slice.call(document.querySelectorAll('body *')).filter(function (e) {
+        const hits = Array.prototype.slice.call(document.querySelectorAll('body *')).filter(function (e) {
           return (e.textContent || '').trim() === t;
+        });
+        // A wrapper whose only content is the matching element has the same
+        // textContent; keep the innermost match so actions hit the real target.
+        return hits.filter(function (e) {
+          return !hits.some(function (o) { return o !== e && typeof e.contains === 'function' && e.contains(o); });
         });
       }
       if (sel.indexOf('role=') === 0) {
@@ -121,6 +135,20 @@ export const PAGE_HELPERS = `(() => {
   };
   W.resolve = function (sel) { const a = W.resolveAll(sel); return a.length ? a[a.length - 1] : null; };
   W.pick = function (sel, idx) { var a = W.resolveAll(sel); if (!a.length) return null; return (idx === null || idx === undefined || idx < 0) ? a[a.length - 1] : a[idx]; };
+  // Scroll el to the viewport centre unless it is already fully inside it — the
+  // hit-test (elementFromPoint) is viewport-relative, so an off-screen control
+  // would otherwise never become actionable. Idempotent once centred.
+  W.scrollIntoViewIfNeeded = function (el) {
+    try {
+      var de = document.documentElement;
+      var vw = window.innerWidth || (de && de.clientWidth) || 0, vh = window.innerHeight || (de && de.clientHeight) || 0;
+      if (!vw || !vh || typeof el.scrollIntoView !== 'function') return false;
+      var r = el.getBoundingClientRect();
+      if (r.x >= 0 && r.y >= 0 && r.x + r.width <= vw && r.y + r.height <= vh) return false;
+      el.scrollIntoView({ block: 'center', inline: 'center' });
+      return true;
+    } catch (e) { return false; }
+  };
   W.state = function (el) {
     const cs = getComputedStyle(el), r = el.getBoundingClientRect();
     const visible = r.width > 0 && r.height > 0 && cs.display !== 'none' && cs.visibility !== 'hidden' && Number(cs.opacity) > 0;
@@ -165,6 +193,7 @@ export const PAGE_HELPERS = `(() => {
   W.callDone = function (id) { var c = W._calls[id]; return c ? (c.done ? 1 : 0) : -1; };
   // Native results often arrive already-JSON-stringified; pass strings through
   // verbatim (no double-encode) and stringify everything else.
+  W.callFree = function (id) { delete W._calls[id]; return 1; };
   W.callJson = function (id) { var c = W._calls[id]; var v = c ? c.value : null; if (v === undefined) v = null; if (typeof v === 'string') return v; try { return JSON.stringify(v); } catch (e) { return String(v); } };
   W.fire = function (name, params) {
     var b = window.__JUCE__ && window.__JUCE__.backend; if (!b) return false;
@@ -172,8 +201,26 @@ export const PAGE_HELPERS = `(() => {
   };
   // --- chunked transfer: WKWebView evaluateJavascript stalls on large returns
   //     (>~100KB), so big values are read in <=32KB slices instead. ---
+  //     Legacy single-buffer pair (kept for older clients sharing this page):
   W.chunkInit = function (s) { W.__chunk = (s == null ? '' : String(s)); return W.__chunk.length; };
   W.chunkAt = function (off, n) { return W.__chunk.substr(off, n); };
+  //     Keyed buffers, one per readBig call so concurrent reads never clobber each
+  //     other. Same value/boundary contract as the host's eval_big op:
+  //     undefined/null -> ''; string as-is; else JSON.stringify (undefined -> '');
+  //     a slice never ends on a high surrogate (the pair stays whole).
+  W._big = W._big || {};
+  W.bigInit = function (key, v) {
+    var s = (v == null) ? '' : (typeof v === 'string' ? v : JSON.stringify(v));
+    if (s === undefined) s = '';
+    W._big[key] = s; return s.length;
+  };
+  W.bigAt = function (key, off, n) {
+    var s = W._big[key]; if (typeof s !== 'string') return null;
+    var end = Math.min(off + n, s.length);
+    if (end < s.length && end - off > 1) { var c = s.charCodeAt(end - 1); if (c >= 0xD800 && c <= 0xDBFF) end--; }
+    return s.slice(off, end);
+  };
+  W.bigFree = function (key) { delete W._big[key]; return 1; };
   // --- structured accessibility snapshot: a compact role/name tree (generic
   //     containers flattened away) — far cheaper to read back than outerHTML, and
   //     it surfaces what an agent acts on (roles, names, values, state). ---
@@ -226,11 +273,37 @@ export const PAGE_HELPERS = `(() => {
   return 'ok';
 })()`;
 const idxArg = (idx) => (idx == null ? 'null' : String(idx));
-const probeCode = (sel, idx) => `JSON.stringify((() => {
+const probeCode = (sel, idx, scroll = false) => `JSON.stringify((() => {
   const a = window.__wae.resolveAll(${JSON.stringify(sel)});
   const el = window.__wae.pick(${JSON.stringify(sel)}, ${idxArg(idx)});
+  ${scroll ? 'if (el) window.__wae.scrollIntoViewIfNeeded(el);' : ''}
   return { n: a.length, state: el ? window.__wae.state(el) : null };
 })())`;
+/** Returned (instead of evaluating the snippet) when window.__wae is gone — a page
+    reload wipes it. The session re-injects PAGE_HELPERS and retries once. */
+const WAE_MISSING = '__wae_helpers_missing__';
+const needWae = (code) => `(window.__wae ? (\n${code}\n) : ${JSON.stringify(WAE_MISSING)})`;
+/** CSS double-quoted string literal (for attribute selectors built from data). */
+const cssString = (s) => '"' + String(s).replace(/[\\"]/g, '\\$&').replace(/\n/g, '\\a ').replace(/\r/g, '\\d ') + '"';
+/** KeyboardEvent.code for a KeyboardEvent.key, as a US-layout keyboard reports it. */
+const PUNCT_CODES = {
+    '-': 'Minus', '=': 'Equal', '[': 'BracketLeft', ']': 'BracketRight', '\\': 'Backslash', ';': 'Semicolon',
+    "'": 'Quote', ',': 'Comma', '.': 'Period', '/': 'Slash', '`': 'Backquote', ' ': 'Space',
+};
+const MODIFIER_CODES = { Shift: 'ShiftLeft', Control: 'ControlLeft', Alt: 'AltLeft', Meta: 'MetaLeft' };
+function keyToCode(key) {
+    if (/^[a-z]$/i.test(key))
+        return 'Key' + key.toUpperCase();
+    if (/^[0-9]$/.test(key))
+        return 'Digit' + key;
+    if (key in PUNCT_CODES)
+        return PUNCT_CODES[key];
+    if (key in MODIFIER_CODES)
+        return MODIFIER_CODES[key];
+    if (/^[A-Z][A-Za-z0-9]+$/.test(key))
+        return key; // Enter, Tab, Escape, ArrowUp, F5, ...
+    return '';
+}
 // Shared preamble for the pointer-sequence actions (click / hover / dblclick):
 // resolve + scroll into view, compute the centre, pick the dispatch target, and
 // define ptr()/mse() dispatch helpers. isTrusted is still false (in-page JS), so
@@ -242,7 +315,7 @@ const probeCode = (sel, idx) => `JSON.stringify((() => {
 const pointerPreamble = (sel, idx, onEl) => `
   const el = window.__wae.pick(${JSON.stringify(sel)}, ${idxArg(idx)});
   if (!el) return 'gone';
-  el.scrollIntoView({ block: 'center', inline: 'center' });
+  window.__wae.scrollIntoViewIfNeeded(el);
   const r = el.getBoundingClientRect();
   const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
   const target = ${onEl ? 'el' : '(document.elementFromPoint(cx, cy) || el)'};
@@ -280,7 +353,7 @@ const pressKeyCode = (sel, key, idx, blur) => `(() => {
   const el = window.__wae.pick(${JSON.stringify(sel)}, ${idxArg(idx)});
   if (!el) return 'gone';
   if (typeof el.focus === 'function') el.focus();
-  const opt = { key: ${JSON.stringify(key)}, code: ${JSON.stringify(key)}, bubbles: true, cancelable: true };
+  const opt = { key: ${JSON.stringify(key)}, code: ${JSON.stringify(keyToCode(key))}, bubbles: true, cancelable: true };
   el.dispatchEvent(new KeyboardEvent('keydown', opt));
   el.dispatchEvent(new KeyboardEvent('keyup', opt));
   ${blur ? 'if (typeof el.blur === "function") el.blur();' : ''}
@@ -307,7 +380,7 @@ const typeCode = (sel, val, idx) => `(() => {
   const el = window.__wae.pick(${JSON.stringify(sel)}, ${idxArg(idx)});
   if (!el) return 'gone';
   if (typeof el.focus === 'function') el.focus();
-  const text = ${JSON.stringify(val)};
+  const text = ${JSON.stringify(String(val))};
   const isField = el instanceof window.HTMLInputElement || el instanceof window.HTMLTextAreaElement;
   let setter = null;
   if (isField) { const proto = el instanceof window.HTMLTextAreaElement ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype; setter = Object.getOwnPropertyDescriptor(proto, 'value').set; }
@@ -389,12 +462,18 @@ const dragUpCode = (x, y, ptr) => `(() => {
   return 'ok';
 })()`;
 // ---- transport: one persistent socket, replies routed by id ---------------
+/** The persistent bridge connection behind a Page. Exposed as `page.session` for
+    advanced callers, but its shape is an implementation detail.
+    @internal */
 class Session {
     sock;
     token;
     pending = new Map();
     _id = 0;
     sinkListeners = new Set();
+    closeListeners = new Set();
+    /** Set once the socket errored or closed: every later request rejects with it. */
+    closedError = null;
     constructor(sock, token) {
         this.sock = sock;
         this.token = token;
@@ -409,13 +488,36 @@ class Session {
                 this.pending.delete(id);
                 p.resolve(m);
             }
+        }, {
+            // An unparseable reply fails the request it belongs to instead of leaving it
+            // to time out; an over-long line destroys the socket (-> close -> _failAll).
+            onError: (e) => {
+                const p = e.id !== undefined ? this.pending.get(e.id) : undefined;
+                if (p && e.id !== undefined) {
+                    this.pending.delete(e.id);
+                    p.reject(e);
+                }
+            },
         });
         sock.on('error', (e) => this._failAll(e));
         sock.on('close', () => this._failAll(new Error('bridge connection closed')));
     }
+    /** True once the connection has errored or closed. */
+    get closed() { return this.closedError !== null; }
     // Subscribe to the unsolicited sink stream (the same frames the CLI `logs`
     // command prints). Returns an unsubscribe fn. A listener must never throw.
     onSink(fn) { this.sinkListeners.add(fn); return () => this.sinkListeners.delete(fn); }
+    /** Called once with the reason when the connection goes away (immediately if it
+        already has). Returns an unsubscribe fn. */
+    onClose(fn) {
+        if (this.closedError) {
+            const e = this.closedError;
+            queueMicrotask(() => fn(e));
+            return () => { };
+        }
+        this.closeListeners.add(fn);
+        return () => this.closeListeners.delete(fn);
+    }
     _emitSink(event) {
         if (!event)
             return;
@@ -426,9 +528,24 @@ class Session {
             catch { /* a listener must not break the stream */ }
         }
     }
-    _failAll(err) { for (const p of this.pending.values())
-        p.reject(err); this.pending.clear(); }
+    _failAll(err) {
+        if (!this.closedError)
+            this.closedError = err instanceof Error ? err : new Error(String(err));
+        for (const p of this.pending.values())
+            p.reject(err);
+        this.pending.clear();
+        const e = this.closedError;
+        for (const fn of [...this.closeListeners]) {
+            try {
+                fn(e);
+            }
+            catch { /* must not break teardown */ }
+        }
+        this.closeListeners.clear();
+    }
     request(obj, { timeoutMs = 15000 } = {}) {
+        if (this.closedError)
+            return Promise.reject(this.closedError);
         return new Promise((resolve, reject) => {
             const id = ++this._id;
             const timer = setTimeout(() => { if (this.pending.delete(id))
@@ -437,7 +554,15 @@ class Session {
                 resolve: (v) => { clearTimeout(timer); resolve(v); },
                 reject: (e) => { clearTimeout(timer); reject(e); },
             });
-            this.sock.write(JSON.stringify({ ...obj, id, ...(this.token ? { token: this.token } : {}) }) + '\n');
+            this.sock.write(JSON.stringify({ ...obj, id, ...(this.token ? { token: this.token } : {}) }) + '\n', (err) => {
+                if (!err)
+                    return;
+                const p = this.pending.get(id);
+                if (p) {
+                    this.pending.delete(id);
+                    p.reject(this.closedError ?? err);
+                }
+            });
         });
     }
     async evalRaw(code, opts) {
@@ -446,10 +571,34 @@ class Session {
             throw new BridgeOpError(r.error, 'eval failed');
         return r.result;
     }
-    close() { try {
-        this.sock.destroy();
+    /** (Re-)inject the page-side helper bundle (window.__wae). */
+    async injectHelpers() {
+        const injected = await this.request({ op: 'eval', code: PAGE_HELPERS });
+        // An unchecked injection hands back a Page whose every locator then fails
+        // cryptically; a failed auth also surfaces here rather than silently.
+        if (!injected.ok) {
+            const he = (injected.error && typeof injected.error === 'object' ? injected.error : {});
+            throw new BridgeOpError({ code: he.code, message: `bridge rejected the page helpers: ${typeof he.message === 'string' ? he.message : 'unknown error'}` }, 'bridge rejected the page helpers');
+        }
     }
-    catch { } }
+    /** Eval a snippet that needs window.__wae. A page reload wipes the helpers, so
+        when they are missing the snippet is not run; the bundle is re-injected and
+        the snippet retried once — no stale-helper failures after a navigation. */
+    async evalWae(code, opts) {
+        const r = await this.evalRaw(needWae(code), opts);
+        if (r !== WAE_MISSING)
+            return r;
+        await this.injectHelpers();
+        return this.evalRaw(needWae(code), opts);
+    }
+    close() {
+        if (!this.closedError)
+            this._failAll(new Error('bridge connection closed'));
+        try {
+            this.sock.destroy();
+        }
+        catch { }
+    }
 }
 /** Run the `hello` handshake and validate the protocol major.
     Null means "capabilities unknown" — a host too old to answer `hello` must
@@ -500,13 +649,7 @@ export async function connect({ host = '127.0.0.1', port, token, timeout = 5000,
         // a named mismatch instead of a late `unknown op` or an unchecked reply.
         caps = await handshake(session);
         requireOp(caps, 'eval', 'connect()'); // the helpers below, and every locator, ride on it
-        const injected = await session.request({ op: 'eval', code: PAGE_HELPERS }); // inject helpers once
-        // An unchecked injection hands back a Page whose every locator then fails
-        // cryptically; a failed auth also surfaces here rather than silently.
-        if (!injected.ok) {
-            const he = injected.error;
-            throw new BridgeOpError({ code: he?.code, message: `bridge rejected the page helpers: ${he?.message ?? 'unknown error'}` }, 'bridge rejected the page helpers');
-        }
+        await session.injectHelpers(); // once here; evalWae re-injects after a page reload
     }
     catch (e) {
         session.close();
@@ -537,27 +680,60 @@ export class Page {
         this.log = typeof log === 'function' ? log : () => { };
     }
     locator(selector) { return new Locator(this, selector); }
-    getByTestId(id) { return new Locator(this, `[data-testid="${id}"]`); }
+    /** Locate by `data-testid`. The id is quoted as a CSS string, so quotes and
+        backslashes in it match literally. */
+    getByTestId(id) { return new Locator(this, `[data-testid=${cssString(id)}]`); }
     /** Escape hatch: run arbitrary JS in the page and get the result (small results). */
     evaluate(code, opts) { return this.session.evalRaw(code, opts); }
-    /** Read a string-valued JS expression in <=chunk slices. WKWebView's
-        evaluateJavascript stalls on large (>~100KB) returns, so big values are
-        pulled in pieces. `expr` must evaluate to (or stringify to) a string. */
+    /** Read a large JS value as a string without tripping WKWebView's
+        evaluateJavascript stall on big (>~100KB) returns.
+  
+        Value contract (identical on both paths): `undefined`/`null` -> `''`; a string
+        is returned as-is; anything else is `JSON.stringify`-ed (a value that
+        stringifies to `undefined`, e.g. a function, -> `''`). `expr` is evaluated
+        once, as a parenthesized expression.
+  
+        Hosts advertising the `eval_big` op assemble the value host-side in one
+        request. Older hosts fall back to a client-side loop over page-side slices;
+        `chunk` (default 32000 UTF-16 units) sizes those slices and applies ONLY to
+        that fallback — `eval_big` picks its own. A slice never splits a surrogate
+        pair, so emoji survive either path intact. */
     async readBig(expr, { chunk = 32000, timeoutMs } = {}) {
-        // Native path: the host assembles the whole value in one request (it does the
-        // chunked read internally), so this is one socket round-trip instead of N. Falls
-        // back to the client-side __wae chunk loop on hosts that predate the eval_big op.
         if (this.caps?.ops.includes('eval_big')) {
-            const r = await this.session.request({ op: 'eval_big', code: expr }, { timeoutMs });
+            const run = () => this.session.request({ op: 'eval_big', code: needWae(`(\n${expr}\n)`) }, { timeoutMs });
+            let r = await run();
+            if (r.ok && r.result === WAE_MISSING) {
+                await this.session.injectHelpers();
+                r = await run();
+            }
             if (!r.ok)
                 throw new BridgeOpError(r.error, 'eval_big failed');
+            if (r.result == null)
+                return ''; // older hosts reply with no result for an empty value
+            if (typeof r.result !== 'string')
+                throw new Error(`eval_big returned a ${typeof r.result}, expected a string`);
             return r.result;
         }
-        const len = await this.session.evalRaw(`window.__wae.chunkInit(${expr})`, { timeoutMs });
-        let out = '';
-        for (let off = 0; off < len; off += chunk)
-            out += await this.session.evalRaw(`window.__wae.chunkAt(${off}, ${chunk})`, { timeoutMs });
-        return out;
+        const size = Math.max(2, Math.floor(chunk)); // >= 2 so a surrogate pair always fits
+        const key = `rb${Date.now().toString(36)}_${(++readBigSeq).toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+        const len = await this.session.evalWae(`window.__wae.bigInit(${JSON.stringify(key)}, (\n${expr}\n))`, { timeoutMs });
+        if (typeof len !== 'number' || !Number.isFinite(len) || len < 0)
+            throw new Error(`readBig: bad length ${safeJson(len)}`);
+        try {
+            let out = '';
+            for (let off = 0; off < len;) {
+                const piece = await this.session.evalRaw(`window.__wae.bigAt(${JSON.stringify(key)}, ${off}, ${size})`, { timeoutMs });
+                if (typeof piece !== 'string' || piece.length === 0)
+                    throw new Error(`readBig: buffer lost at offset ${off}/${len} (page reloaded?)`);
+                out += piece;
+                off += piece.length; // a slice may be one short (surrogate boundary): advance by what came back
+            }
+            return out;
+        }
+        finally {
+            if (!this.session.closed)
+                await this.session.evalRaw(`(window.__wae && window.__wae.bigFree ? window.__wae.bigFree(${JSON.stringify(key)}) : 0)`, { timeoutMs }).catch(() => { });
+        }
     }
     /** Structured accessibility snapshot of the page (or a subtree) — a compact
         role/name tree with value/checked/disabled, generic containers flattened away.
@@ -576,29 +752,42 @@ export class Page {
         connect() `backendTimeoutMs` option (default 10s). */
     async backend(name, ...params) {
         this.log(`backend ${name}(${params.map((p) => JSON.stringify(p)).join(', ')})`);
-        const id = await this.session.evalRaw(`window.__wae.invoke(${JSON.stringify(name)}, ${JSON.stringify(params)})`);
+        const id = await this.session.evalWae(`window.__wae.invoke(${JSON.stringify(name)}, ${JSON.stringify(params)})`);
         if (id === -1)
             throw new Error('JUCE backend unavailable (window.__JUCE__.backend missing)');
-        const deadline = Date.now() + this.backendTimeoutMs;
-        for (;;) {
-            if ((await this.session.evalRaw(`window.__wae.callDone(${id})`)) === 1)
-                break;
-            if (Date.now() >= deadline)
-                throw new Error(`backend("${name}") timed out`);
-            await sleep(this.interval);
-        }
-        const raw = await this.readBig(`window.__wae.callJson(${id})`);
+        if (typeof id !== 'number')
+            throw new Error(`backend("${name}"): unexpected invoke id ${safeJson(id)}`);
         try {
-            return JSON.parse(raw);
+            const deadline = Date.now() + this.backendTimeoutMs;
+            for (;;) {
+                const done = await this.session.evalWae(`window.__wae.callDone(${id})`);
+                if (done === 1)
+                    break;
+                // -1: the call record is gone — the page reloaded under the pending call.
+                if (done === -1)
+                    throw new Error(`backend("${name}") lost: the page reloaded before it completed`);
+                if (Date.now() >= deadline)
+                    throw new Error(`backend("${name}") timed out`);
+                await sleep(this.interval);
+            }
+            const raw = await this.readBig(`window.__wae.callJson(${id})`);
+            try {
+                return JSON.parse(raw);
+            }
+            catch {
+                return raw;
+            } // tolerate plain-string results
         }
-        catch {
-            return raw;
-        } // tolerate plain-string results
+        finally {
+            // Drop the page-side call record (a late completion is then ignored).
+            if (!this.session.closed)
+                await this.session.evalRaw(`(window.__wae && window.__wae.callFree ? window.__wae.callFree(${id}) : 0)`).catch(() => { });
+        }
     }
     /** Fire a JUCE native function without awaiting a result (resultId = -1). */
     fireBackend(name, ...params) {
         this.log(`fire ${name}(${params.map((p) => JSON.stringify(p)).join(', ')})`);
-        return this.session.evalRaw(`window.__wae.fire(${JSON.stringify(name)}, ${JSON.stringify(params)})`);
+        return this.session.evalWae(`window.__wae.fire(${JSON.stringify(name)}, ${JSON.stringify(params)})`);
     }
     // ---- live page event stream (console / network / error) -----------------
     // The bridge broadcasts captured console/network/error events as sink frames
@@ -621,7 +810,8 @@ export class Page {
         } });
     }
     /** Resolve with the first sink event of `kind` (optionally matching predicate),
-        or reject on timeout. predicate receives the raw event { kind, t, data }. */
+        or reject on timeout or when the bridge connection closes. predicate
+        receives the raw event { kind, t, data }. */
     waitForEvent(kind, predicate, { timeout } = {}) {
         if (typeof predicate === 'object' && predicate !== null) {
             timeout = predicate.timeout;
@@ -630,8 +820,9 @@ export class Page {
         const ms = timeout ?? this.defaultTimeout;
         this.log(`waitForEvent ${kind}`);
         return new Promise((resolve, reject) => {
-            let off = () => { };
-            const timer = setTimeout(() => { off(); reject(new Error(`waitForEvent(${kind}) timed out after ${ms}ms`)); }, ms);
+            let off = () => { }, offClose = () => { };
+            const done = () => { clearTimeout(timer); off(); offClose(); };
+            const timer = setTimeout(() => { done(); reject(new Error(`waitForEvent(${kind}) timed out after ${ms}ms`)); }, ms);
             off = this.session.onSink((ev) => {
                 if (kind !== '*' && ev.kind !== kind)
                     return;
@@ -644,10 +835,10 @@ export class Page {
                     if (!ok)
                         return;
                 }
-                clearTimeout(timer);
-                off();
+                done();
                 resolve(ev);
             });
+            offClose = this.session.onClose((e) => { done(); reject(new Error(`waitForEvent(${kind}) aborted: ${e.message}`, { cause: e })); });
         });
     }
     /** Resolve with the network event `data` for the first fetch/XHR whose URL
@@ -674,6 +865,8 @@ export class Page {
         const r = await this.session.request({ op: 'sink_replay', since });
         if (!r.ok)
             throw new BridgeOpError(r.error, 'sink_replay failed');
+        if (typeof r.count !== 'number')
+            throw new Error(`sink_replay returned a non-numeric count: ${safeJson(r.count)}`);
         return r.count;
     }
     /** Poll a JS boolean expression in the page until it is truthy (or time out).
@@ -697,7 +890,7 @@ export class Page {
         const deadline = Date.now() + (timeout ?? this.defaultTimeout);
         let v;
         for (;;) {
-            v = JSON.parse(await this.session.evalRaw(`JSON.stringify(${expr} ?? null)`));
+            v = JSON.parse(await this.session.evalRaw(jsonExpr(expr)));
             if (pred(v))
                 return v;
             if (Date.now() >= deadline)
@@ -711,11 +904,11 @@ export class Page {
         one. Returns the last value read. */
     async pollStable(expr, { timeout, interval = 120, settles = 2 } = {}) {
         const deadline = Date.now() + (timeout ?? this.defaultTimeout);
-        let last = await this.session.evalRaw(`JSON.stringify(${expr} ?? null)`);
+        let last = await this.session.evalRaw(jsonExpr(expr));
         let stable = 0;
         for (;;) {
             await sleep(interval);
-            const cur = await this.session.evalRaw(`JSON.stringify(${expr} ?? null)`);
+            const cur = await this.session.evalRaw(jsonExpr(expr));
             if (cur === last) {
                 if (++stable >= settles)
                     return JSON.parse(cur);
@@ -741,20 +934,28 @@ export class Page {
         const sigExpr = motionSelector
             ? `[...document.querySelectorAll(${JSON.stringify(motionSelector)})].map(e=>(e.getAttribute('d')||'')+(e.getAttribute('transform')||'')+(e.getAttribute('style')||'')).join('|')`
             : `''`;
+        // The probe stops itself page-side after maxMs even if this client never comes
+        // back to read it (crash, closed socket), so an abandoned run cannot leave a rAF
+        // loop and a DevTools-hook wrapper running forever. A still-running earlier probe
+        // is stopped first, and the hook is unwrapped to its original before wrapping,
+        // so wrappers never stack.
+        const maxMs = durationMs + 10000;
         await this.session.evalRaw(`(function(){
-      const J={running:true,frames:0,maxGap:0,last:performance.now(),t0:performance.now(),gaps:[],commits:0,n24:0,n50:0};
+      const P=window.__waePerfProbe;if(P&&P.stop)P.stop();
+      const J={running:true,frames:0,maxGap:0,last:performance.now(),t0:performance.now(),gaps:[],commits:0,n24:0,n50:0,maxMs:${maxMs}};
       window.__waePerfProbe=J;
       J.sig0=${sigExpr};
       const h=window.__REACT_DEVTOOLS_GLOBAL_HOOK__;
-      if(h&&h.onCommitFiberRoot){J.orig=h.onCommitFiberRoot;h.onCommitFiberRoot=function(){J.commits++;return J.orig.apply(this,arguments);};}
-      function t(){if(!J.running)return;const n=performance.now();const g=n-J.last;J.last=n;J.frames++;if(J.frames>2){if(g>J.maxGap)J.maxGap=g;if(g>24)J.n24++;if(g>50)J.n50++;J.gaps.push(g);}requestAnimationFrame(t);}
+      J.stop=function(){if(!J.running)return;J.running=false;J.t1=performance.now();if(h&&J.wrap&&h.onCommitFiberRoot===J.wrap)h.onCommitFiberRoot=J.orig;};
+      if(h&&h.onCommitFiberRoot){let base=h.onCommitFiberRoot;while(base&&base.__waeOrig)base=base.__waeOrig;J.orig=base;
+        J.wrap=function(){if(J.running)J.commits++;return J.orig.apply(this,arguments);};J.wrap.__waeOrig=base;h.onCommitFiberRoot=J.wrap;}
+      function t(){if(!J.running)return;const n=performance.now();if(n-J.t0>J.maxMs){J.stop();return;}const g=n-J.last;J.last=n;J.frames++;if(J.frames>2){if(g>J.maxGap)J.maxGap=g;if(g>24)J.n24++;if(g>50)J.n50++;J.gaps.push(g);}requestAnimationFrame(t);}
       requestAnimationFrame(t);return 1;
     })()`);
         await sleep(durationMs);
         return JSON.parse(await this.readBig(`(function(){
-      const J=window.__waePerfProbe;J.running=false;
-      const h=window.__REACT_DEVTOOLS_GLOBAL_HOOK__;if(h&&J.orig)h.onCommitFiberRoot=J.orig;
-      const d=performance.now()-J.t0;const g=J.gaps.slice().sort((a,b)=>a-b);const p=q=>Math.round(g[Math.floor(g.length*q)]||0);
+      const J=window.__waePerfProbe;if(!J)throw new Error('render-perf probe missing (page reloaded?)');J.stop();
+      const d=(J.t1||performance.now())-J.t0;const g=J.gaps.slice().sort((a,b)=>a-b);const p=q=>Math.round(g[Math.floor(g.length*q)]||0);
       const sig=${sigExpr};
       const med=g[Math.floor(g.length*0.5)]||16.7;const hz=Math.round(1000/med);
       const dropRel=g.filter(x=>x>med*1.5).length;const drop2x=g.filter(x=>x>med*2).length;
@@ -798,6 +999,8 @@ export class Page {
         const r = await this.session.request({ op: 'layertree' }, { timeoutMs: 10000 });
         if (!r.ok)
             throw new BridgeOpError(r.error, 'layertree unavailable');
+        if (typeof r.text !== 'string')
+            throw new Error('layertree reply carried no text');
         return r.text;
     }
     /** Native screenshot of the host window (incl. WebGL) via the bridge `shot` op.
@@ -809,13 +1012,16 @@ export class Page {
         const r = await this.session.request({ op: 'shot', ...(path ? { path } : {}), ...(clip ? { rect: clip } : {}) }, { timeoutMs: 30000 });
         if (!r.ok)
             throw new BridgeOpError(r.error, 'native screenshot failed');
+        if (typeof r.path !== 'string')
+            throw new Error('shot reply carried no path');
         return r.path;
     }
     /** Frame-rate capture of the host window to a directory of PNGs via the `shot_stream`
         op (persistent SCStream; macOS-only for now). Runs for `durationMs` at ~`fps`,
         writing one PNG per frame. Returns the directory, frame count, and the collected
         frame descriptors; frames also arrive live as `frame` sink events
-        (`page.on('frame')`). `clip: {x,y,w,h}` (CSS px) crops to a UI region. */
+        (`page.on('frame')`). `clip: {x,y,w,h}` (CSS px) crops to a UI region.
+        Rejects if the bridge connection closes mid-capture. */
     async captureStream({ fps, durationMs, clip, dir, timeout } = {}) {
         requireOp(this.caps, 'shot_stream', 'page.captureStream()');
         this.log(`captureStream${clip ? ' (region)' : ''} fps=${fps ?? 30} dur=${durationMs ?? 1000}ms`);
@@ -825,12 +1031,13 @@ export class Page {
             const r = await this.session.request({ op: 'shot_stream', ...(dir ? { dir } : {}), ...(fps ? { fps } : {}), ...(durationMs ? { durationMs } : {}), ...(clip ? { rect: clip } : {}) }, { timeoutMs: timeout ?? (durationMs ?? 1000) + 30000 });
             if (!r.ok)
                 throw new BridgeOpError(r.error, 'shot_stream failed');
+            const count = Number(r.count) || 0;
             // `frame` events broadcast asynchronously, so a few may still be in flight when
             // the reply lands — give stragglers a moment to reach the reported count.
             const deadline = Date.now() + 1000;
-            while (frames.length < r.count && Date.now() < deadline)
-                await new Promise((res) => setTimeout(res, 20));
-            return { dir: r.dir, count: r.count, frames };
+            while (frames.length < count && Date.now() < deadline && !this.session.closed)
+                await sleep(20);
+            return { dir: String(r.dir ?? ''), count, frames };
         }
         finally {
             off();
@@ -846,19 +1053,27 @@ export class Locator {
     /** Narrow to the i-th match (0-based); negative or null = last match. */
     nth(i) { return new Locator(this.page, this.selector, i); }
     first() { return this.nth(0); }
+    /** One actionability probe round-trip. `scroll` first scrolls the element into
+        the viewport if needed (pointer actions hit-test viewport coordinates).
+        @internal */
     async _probe(opts) {
-        const r = await this.page.session.evalRaw(probeCode(this.selector, this.index), opts);
-        return typeof r === 'string' ? JSON.parse(r) : r;
+        const r = await this.page.session.evalWae(probeCode(this.selector, this.index, !!opts?.scroll), opts);
+        const p = typeof r === 'string' ? JSON.parse(r) : r;
+        if (!p || typeof p !== 'object' || typeof p.n !== 'number')
+            throw new Error(`locator(${JSON.stringify(this.selector)}): malformed probe reply ${safeJson(r)}`);
+        return p;
     }
     async count() { return (await this._probe()).n; }
     async isVisible() { const p = await this._probe(); return !!(p.state && p.state.visible); }
     async textContent() { const p = await this._probe(); return p.state ? p.state.text : null; }
-    async getAttribute(name) { return this.page.session.evalRaw(attrCode(this.selector, name, this.index)); }
+    async getAttribute(name) { return this.page.session.evalWae(attrCode(this.selector, name, this.index)); }
     // Actionability wait shared by the pointer actions: visible (+ enabled + hit
     // unless relaxed) AND a box that held still across two consecutive polls.
     // force skips hit-testing + stability entirely (visible is enough) — for a
     // control sitting under a (often decorative) overlay that a centre-point
     // hit-test would otherwise see as occluded.
+    // Probes scroll the target into view first (Playwright-style): the hit-test is
+    // viewport-relative, so an off-screen control would otherwise never pass.
     _waitStable({ needEnabled = true, force, timeout, what }) {
         let prevBox = null;
         return this._waitUntil((p) => {
@@ -869,12 +1084,12 @@ export class Locator {
             const stable = box && prevBox && box.x === prevBox.x && box.y === prevBox.y && box.w === prevBox.w && box.h === prevBox.h;
             prevBox = box;
             return !!(ok && stable);
-        }, timeout, what);
+        }, timeout, what, { scroll: true });
     }
     async click({ timeout, force } = {}) {
         this.page.log(`click ${this.selector}${this.index != null ? `[${this.index}]` : ''}${force ? ' (force)' : ''}`);
         await this._waitStable({ force, timeout, what: 'click' });
-        const r = await this.page.session.evalRaw(clickCode(this.selector, this.index, !!force));
+        const r = await this.page.session.evalWae(clickCode(this.selector, this.index, !!force));
         if (r !== 'ok')
             throw new Error(`click failed on ${JSON.stringify(this.selector)}: ${r}`);
     }
@@ -883,11 +1098,11 @@ export class Locator {
     async fill(value, { timeout, enter } = {}) {
         this.page.log(`fill ${this.selector} = ${JSON.stringify(value)}${enter ? ' ⏎' : ''}`);
         await this._waitUntil((p) => !!(p.state && p.state.visible && p.state.enabled && p.state.editable), timeout, 'fill');
-        const r = await this.page.session.evalRaw(fillCode(this.selector, value, this.index));
+        const r = await this.page.session.evalWae(fillCode(this.selector, value, this.index));
         if (r !== 'ok')
             throw new Error(`fill failed on ${JSON.stringify(this.selector)}: ${r}`);
         if (enter)
-            await this.page.session.evalRaw(pressKeyCode(this.selector, 'Enter', this.index, true));
+            await this.page.session.evalWae(pressKeyCode(this.selector, 'Enter', this.index, true));
     }
     // ---- more element-level actions (all wait for actionability first) ------
     /** Hover the element centre (pointerover/mouseover) — opens hover menus/tooltips.
@@ -895,7 +1110,7 @@ export class Locator {
     async hover({ timeout, force } = {}) {
         this.page.log(`hover ${this.selector}${force ? ' (force)' : ''}`);
         await this._waitStable({ needEnabled: false, force, timeout, what: 'hover' });
-        const r = await this.page.session.evalRaw(hoverCode(this.selector, this.index, !!force));
+        const r = await this.page.session.evalWae(hoverCode(this.selector, this.index, !!force));
         if (r !== 'ok')
             throw new Error(`hover failed on ${JSON.stringify(this.selector)}: ${r}`);
     }
@@ -903,7 +1118,7 @@ export class Locator {
     async dblclick({ timeout, force } = {}) {
         this.page.log(`dblclick ${this.selector}${force ? ' (force)' : ''}`);
         await this._waitStable({ force, timeout, what: 'dblclick' });
-        const r = await this.page.session.evalRaw(dblclickCode(this.selector, this.index, !!force));
+        const r = await this.page.session.evalWae(dblclickCode(this.selector, this.index, !!force));
         if (r !== 'ok')
             throw new Error(`dblclick failed on ${JSON.stringify(this.selector)}: ${r}`);
     }
@@ -912,7 +1127,7 @@ export class Locator {
     async type(value, { timeout } = {}) {
         this.page.log(`type ${this.selector} = ${JSON.stringify(value)}`);
         await this._waitUntil((p) => !!(p.state && p.state.visible && p.state.enabled), timeout, 'type');
-        const r = await this.page.session.evalRaw(typeCode(this.selector, value, this.index));
+        const r = await this.page.session.evalWae(typeCode(this.selector, value, this.index));
         if (r !== 'ok')
             throw new Error(`type failed on ${JSON.stringify(this.selector)}: ${r}`);
     }
@@ -920,7 +1135,7 @@ export class Locator {
     async press(key, { timeout } = {}) {
         this.page.log(`press ${this.selector} ${key}`);
         await this._waitUntil((p) => !!(p.state && p.state.visible && p.state.enabled), timeout, 'press');
-        const r = await this.page.session.evalRaw(pressKeyCode(this.selector, key, this.index, false));
+        const r = await this.page.session.evalWae(pressKeyCode(this.selector, key, this.index, false));
         if (r !== 'ok')
             throw new Error(`press failed on ${JSON.stringify(this.selector)}: ${r}`);
     }
@@ -928,7 +1143,7 @@ export class Locator {
     async selectOption(value, { timeout } = {}) {
         this.page.log(`selectOption ${this.selector} = ${JSON.stringify(value)}`);
         await this._waitUntil((p) => !!(p.state && p.state.visible && p.state.enabled), timeout, 'selectOption');
-        const r = await this.page.session.evalRaw(selectOptionCode(this.selector, value, this.index));
+        const r = await this.page.session.evalWae(selectOptionCode(this.selector, value, this.index));
         if (r !== 'ok')
             throw new Error(`selectOption failed on ${JSON.stringify(this.selector)}: ${r}`);
     }
@@ -940,7 +1155,7 @@ export class Locator {
         const what = desired ? 'check' : 'uncheck';
         this.page.log(`${what} ${this.selector}`);
         await this._waitUntil((p) => !!(p.state && p.state.visible && p.state.enabled), timeout, what);
-        const r = await this.page.session.evalRaw(checkCode(this.selector, this.index, desired));
+        const r = await this.page.session.evalWae(checkCode(this.selector, this.index, desired));
         if (r !== 'ok')
             throw new Error(`${what} failed on ${JSON.stringify(this.selector)}: ${r}`);
     }
@@ -948,7 +1163,7 @@ export class Locator {
     async focus({ timeout } = {}) {
         this.page.log(`focus ${this.selector}`);
         await this._waitUntil((p) => !!(p.state && p.state.visible), timeout, 'focus');
-        const r = await this.page.session.evalRaw(focusCode(this.selector, this.index));
+        const r = await this.page.session.evalWae(focusCode(this.selector, this.index));
         if (r !== 'ok')
             throw new Error(`focus failed on ${JSON.stringify(this.selector)}: ${r}`);
     }
@@ -986,16 +1201,29 @@ export class Locator {
             }
             return !!ok;
         }, timeout, 'drag');
-        let r = await this.page.session.evalRaw(dragDownCode(this.selector, this.index, cx, cy, pointer));
+        const r = await this.page.session.evalWae(dragDownCode(this.selector, this.index, cx, cy, pointer));
         if (r !== 'ok')
             throw new Error(`drag mousedown failed on ${JSON.stringify(this.selector)}: ${r}`);
-        await sleep(settleMs); // let the widget's onMouseDown effect attach its document listeners
-        for (let s = 1; s <= steps; s++) {
-            await this.page.session.evalRaw(dragMoveCode(cx + (dx * s) / steps, cy + (dy * s) / steps, pointer));
-            if (stepMs)
-                await sleep(stepMs);
+        // Once pressed, ALWAYS release: a failed move must not leave the widget in a
+        // dragging state (it would swallow every later pointer event). The release is
+        // best-effort so the original failure is what surfaces.
+        let moved = false;
+        try {
+            await sleep(settleMs); // let the widget's onMouseDown effect attach its document listeners
+            for (let s = 1; s <= steps; s++) {
+                await this.page.session.evalRaw(dragMoveCode(cx + (dx * s) / steps, cy + (dy * s) / steps, pointer));
+                if (stepMs)
+                    await sleep(stepMs);
+            }
+            moved = true;
         }
-        await this.page.session.evalRaw(dragUpCode(cx + dx, cy + dy, pointer));
+        finally {
+            const up = this.page.session.evalRaw(dragUpCode(cx + dx, cy + dy, pointer));
+            if (moved)
+                await up;
+            else
+                await up.catch(() => { });
+        }
     }
     async waitFor({ state = 'visible', timeout } = {}) {
         await this._waitUntil((p) => {
@@ -1008,18 +1236,32 @@ export class Locator {
             return !!(p.state && p.state.visible); // 'visible'
         }, timeout, `waitFor:${state}`);
     }
-    // Poll the probe until pred(probe) holds, or throw a descriptive timeout.
-    async _waitUntil(pred, timeout, what) {
-        const deadline = Date.now() + (timeout ?? this.page.defaultTimeout);
-        let last;
+    /** Poll the probe until pred(probe) holds, or throw a descriptive timeout.
+        Each probe gets the time left (floored at PROBE_FLOOR_MS) as its request
+        timeout, so a stalled host cannot stretch the wait past `timeout`.
+        @internal */
+    async _waitUntil(pred, timeout, what, { scroll = false } = {}) {
+        const ms = timeout ?? this.page.defaultTimeout;
+        const deadline = Date.now() + ms;
+        const notReady = (last, cause) => new Error(`locator(${JSON.stringify(this.selector)}) not ready for "${what}" within ${ms}ms `
+            + (last ? `(n=${last.n}, state=${JSON.stringify(last.state)})` : '(no probe reply)'), cause ? { cause } : undefined);
+        let last = null;
         for (;;) {
-            last = await this._probe();
+            try {
+                last = await this._probe({ timeoutMs: Math.max(deadline - Date.now(), PROBE_FLOOR_MS), scroll });
+            }
+            catch (e) {
+                // A probe that ran out the clock is the locator's timeout, not a transport bug.
+                if (e instanceof Error && e.message === 'bridge request timeout')
+                    throw notReady(last, e);
+                throw e;
+            }
             if (pred(last))
                 return last;
-            if (Date.now() >= deadline)
-                throw new Error(`locator(${JSON.stringify(this.selector)}) not ready for "${what}" within ${timeout ?? this.page.defaultTimeout}ms `
-                    + `(n=${last.n}, state=${JSON.stringify(last.state)})`);
-            await sleep(this.page.interval);
+            const left = deadline - Date.now();
+            if (left <= 0)
+                throw notReady(last);
+            await sleep(Math.min(this.page.interval, left));
         }
     }
 }
@@ -1029,6 +1271,11 @@ const safeJson = (v) => { try {
 catch {
     return String(v);
 } };
+// A /g or /y RegExp carries lastIndex between test() calls, so polling one would
+// alternate match/no-match on identical text. Test against a stateless copy.
+const matches = (expected, actual) => expected instanceof RegExp
+    ? new RegExp(expected.source, expected.flags.replace(/[gy]/g, '')).test(actual)
+    : actual === expected;
 function expectLocator(locator) {
     // make(invert) builds the matcher set; expect(loc).not.* reuses it with the
     // predicate negated (each matcher auto-retries until it holds, or times out).
@@ -1041,9 +1288,9 @@ function expectLocator(locator) {
             toBeDisabled: (o) => wait((p) => !!(p.state && !p.state.enabled), 'toBeDisabled', o),
             toBeChecked: (o) => wait((p) => !!(p.state && p.state.checked), 'toBeChecked', o),
             toHaveCount: (n, o) => wait((p) => p.n === n, `toHaveCount:${n}`, o),
-            toHaveText: (expected, o) => wait((p) => !!(p.state && (expected instanceof RegExp ? expected.test(p.state.text) : p.state.text === expected)), `toHaveText:${expected}`, o),
+            toHaveText: (expected, o) => wait((p) => !!(p.state && matches(expected, p.state.text)), `toHaveText:${expected}`, o),
             toContainText: (sub, o) => wait((p) => !!(p.state && p.state.text.includes(sub)), `toContainText:${sub}`, o),
-            toHaveValue: (expected, o) => wait((p) => !!(p.state && p.state.value != null && (expected instanceof RegExp ? expected.test(p.state.value) : p.state.value === expected)), `toHaveValue:${expected}`, o),
+            toHaveValue: (expected, o) => wait((p) => !!(p.state && p.state.value != null && matches(expected, p.state.value)), `toHaveValue:${expected}`, o),
         };
     };
     return { ...make(false), not: make(true) };

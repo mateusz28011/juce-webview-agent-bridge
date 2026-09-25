@@ -14,7 +14,9 @@ export interface Discovery {
 /** Enumerate every registered bridge instance — the per-port files under
  *  `<home>/.web_agent_bridge.d`, sorted by port. Each entry is the full discovery
  *  record (`{port, token, pid, processName, startedAt, label?}`), so a client can
- *  present a readable instance list instead of blindly picking the lowest port. */
+ *  present a readable instance list instead of blindly picking the lowest port.
+ *  Records whose `pid` no longer exists (a host that crashed without removing its
+ *  file) are skipped, so a stale file is never picked over a live instance. */
 export declare function listInstances(): Array<Discovery & {
     port: number;
 }>;
@@ -96,11 +98,35 @@ export declare function requireOp(caps: BridgeCapabilities | null, op: string, a
  *  The host writes them on start so clients never guess: each instance registers
  *  <home>/.web_agent_bridge.d/<port>.json (so several hosts — e.g. multiple
  *  plugin instances in a DAW — don't clobber each other), plus the single legacy
- *  <home>/.web_agent_bridge.json for older single-instance hosts. Enumerate the
- *  registry and pick the requested port (or the lowest), then fall back to the
- *  legacy file. Returns {} when nothing is found. */
+ *  <home>/.web_agent_bridge.json for older single-instance hosts.
+ *
+ *  With `preferredPort`, ONLY a record for that port is returned (its per-port
+ *  file, else the legacy file when it names that port), otherwise {} — never
+ *  another instance's record, whose token would be presented to the wrong host.
+ *  Without it, the lowest-port live instance wins, then the legacy file.
+ *  Returns {} when nothing is found. */
 export declare function loadDiscovery(preferredPort?: number): Discovery;
+/** The default cap on one NDJSON line (characters). A reply larger than this is a
+ *  broken or hostile peer, not a result: the reader errors instead of buffering
+ *  without bound. eval_big replies are the largest legitimate lines. */
+export declare const MAX_JSON_LINE: number;
+/** Error surfaced by onJsonLines for a line it could not deliver: an unparseable
+ *  line (`line` set, and `id` when a numeric `"id"` could be recovered from it so the
+ *  caller can fail exactly that pending request) or an over-long line. */
+export interface JsonLineError extends Error {
+    line?: string;
+    id?: number;
+}
+export interface JsonLinesOptions {
+    /** Called for a line that could not be delivered. Without it, unparseable lines
+     *  are skipped (the historical behaviour); an over-long line always destroys the socket. */
+    onError?: (error: JsonLineError) => void;
+    /** Maximum characters buffered for one line (default MAX_JSON_LINE). */
+    maxLineLength?: number;
+}
 /** Attach an NDJSON reader to a socket: reassembles newline-delimited JSON
  *  lines across TCP chunks (multi-byte-safe via StringDecoder) and calls fn
- *  with each parsed message. Unparseable or blank lines are skipped. */
-export declare function onJsonLines(sock: Pick<Socket, 'on'>, fn: (message: Record<string, unknown>) => void): void;
+ *  with each parsed message. Blank lines are skipped; an unparseable line or one
+ *  over `maxLineLength` goes to `onError` (see JsonLinesOptions). Each byte is
+ *  scanned for a newline once, so a large reply split into many chunks stays linear. */
+export declare function onJsonLines(sock: Pick<Socket, 'on'> & Partial<Pick<Socket, 'destroy'>>, fn: (message: Record<string, unknown>) => void, { onError, maxLineLength }?: JsonLinesOptions): void;

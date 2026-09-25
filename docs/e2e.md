@@ -7,12 +7,14 @@ API summary (Selectors / Page / Locator / `expect`), see the
 
 ## Live page events
 
-The bridge broadcasts captured `console` / `error` / `net` / `navigation` events as
-`sink` frames on the same authenticated socket, so the e2e client can await them
-Playwright-style. A `navigation` event (`data: {url, title}`) fires on every page
-(re)load — await it to know a reload wiped your injected state. A freshly-connected
-client only sees events from *now on*, so set up the wait **before** the action that
-triggers it:
+The bridge broadcasts captured `console` / `error` / `net` / `navigation` / `frame`
+events as `sink` frames on the same authenticated socket, so the e2e client can await
+them Playwright-style. A `navigation` event (`data: {url, title}`) fires on every page
+(re)load — await it to know a reload wiped your injected state. A `frame` event
+(`data: {path, w, h}`) fires per PNG written during a `captureStream()` run (see
+"Frame-rate capture" below) — the path and pixel size of that frame. A
+freshly-connected client only sees events from *now on*, so set up the wait **before**
+the action that triggers it:
 
 ```js
 const [resp] = await Promise.all([
@@ -71,8 +73,56 @@ instead of going silent. Pass `connect({ log: fn })` to route lines yourself, or
 ## Large values
 
 WKWebView's `evaluateJavascript` stalls on returns over ~100 KB, so
-`page.readBig('JSON.stringify(window.someBigState)')` pulls a string in ≤32 KB chunks
-(400 KB in ~13 chunks / tens of ms). Use it for any big payload.
+`page.readBig(expr)` gets a big value without hitting that ceiling. `expr` must be a
+JS **expression** (its value is what gets captured) — not a statement or a block.
+
+Against a host that advertises the `eval_big` op (`page.caps.ops`), `readBig` sends
+one request and the host does the chunking itself: it evaluates `expr`, converts the
+result (`undefined`/`null` → `''`, a `string` used as-is, anything else
+`JSON.stringify`'d), stashes it in a page global, and reassembles it host-side from
+sub-threshold slices — surrogate-pair-safe, so a chunk boundary never splits a UTF-16
+surrogate pair. One socket round-trip instead of N.
+
+Against an older host (no `eval_big`), `readBig` falls back to a client-side loop:
+`window.__wae.bigInit(key, expr)` stores the converted value under a per-call key
+(same conversion and surrogate-safe slicing as the host path, so concurrent reads
+never mix) and returns its length, then repeated `window.__wae.bigAt(key, offset, chunk)`
+calls pull it in `{ chunk }` slices, and `bigFree(key)` releases it (default
+32 KB — 400 KB in ~13 chunks / tens of ms). The `chunk` option only affects this
+fallback path; it's ignored on a host with native `eval_big`, since the host picks its
+own sub-threshold slice size there.
+
+```js
+const state = JSON.parse(await page.readBig('JSON.stringify(window.someBigState)'));
+```
+
+## Frame-rate capture
+
+`page.captureStream({ fps, durationMs, clip })` runs a **persistent** capture stream
+against the host window for `durationMs` at ~`fps`, writing one PNG per frame to a
+directory and resolving `{ dir, count, frames: [...] }`. Frames also arrive live as
+`frame` sink events (`data: {path, w, h}`) while the capture runs, so a listener can
+process them as they land instead of waiting for the whole run. Use this instead of
+repeated one-shot `shot` calls (~9 fps) when you need to measure actual pixel motion
+or smoothness over a window.
+
+```js
+const off = page.on('frame', (ev) => console.log('frame', ev.data.path));
+const { dir, count } = await page.captureStream({ fps: 30, durationMs: 1000 });
+off();
+```
+
+**Platform:** backed by `shot_stream`, which needs a persistent `SCStream` — **macOS
+14+ only**. On other platforms (and on macOS 13 or earlier) the op isn't advertised
+in `hello.ops` / `page.caps.ops`, so `captureStream()` fails fast with a plain
+`Error` from `requireOp()` naming the missing `shot_stream` op — no request is
+sent. A host that does advertise it but then cannot capture replies with a
+`BridgeOpError` (`SCREENSHOT_UNAVAILABLE` / `SCREENSHOT_FAILED`). `clip` crops to a
+region like `shot`/`locator.screenshot()`.
+
+As with `shot`, the PNGs are written to a client-supplied `dir` — the authenticated
+client can write anywhere the host process can, so this is not itself a sandboxing
+boundary (loopback + token is).
 
 ## JUCE native functions (JUCE hosts)
 

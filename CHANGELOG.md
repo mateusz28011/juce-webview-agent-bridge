@@ -5,6 +5,75 @@ commit comparisons are available from the linked GitHub Releases.
 
 ## [Unreleased]
 
+### Added
+
+- A successful `shot_stream` reply may carry a `warning` string (e.g. the stream
+  stopped with an error after frames were written); `ok:true` replies never carry
+  `error`.
+- Fetch sink events carry `bodyOmitted: "event-stream" | "too-large"` when the
+  response body was skipped instead of buffered.
+- `onJsonLines` accepts an optional `{ onError, maxLineLength }` argument; new
+  `MAX_JSON_LINE`, `JsonLineError`, and `JsonLinesOptions` exports.
+
+### Changed
+
+- Replies and sink frames are written by a per-connection write thread instead of
+  the message thread. A client that accepts no bytes for 5 s is disconnected, and
+  `setSinkLimits(queueMax)` now bounds each connection's backlog.
+- `hello.ops` lists `shot_stream` only when a stream function is bound (by
+  `connect()` on macOS, or by the embedder) and, on macOS, the OS is 14+; otherwise
+  the op replies `SCREENSHOT_UNAVAILABLE`.
+- Unknown-op replies echo the requested `op` instead of `"eval"`.
+- `layerdebug` / `layertree` act only on the WebView bound by `connect()`, not on
+  other WebViews in its window or the process, and report `LAYER_UNAVAILABLE`
+  without one.
+- `eval_big` and the `readBig` fallback share one value conversion: `undefined` /
+  `null` → `''`, strings as-is, anything else `JSON.stringify`'d. `code` is wrapped
+  as an expression, so a trailing `// comment` no longer breaks it.
+- The CLI exits non-zero when a command fails (no pong, no element, op error, `logs`
+  auth rejection or a host closing the stream before acknowledging auth) and 2 on
+  usage errors, printing `error: …` to stderr.
+- The CLI authenticates each connection with its own `{"op":"auth"}` line instead of
+  adding the token to the request.
+- The e2e client re-injects its page helpers automatically after a page reload.
+
+### Fixed
+
+- A client that stopped reading could hang the host's message thread or `stop()`.
+- Windows: large replies were truncated and the connection dropped on a partial send.
+- `eval_big` leaked each result, concurrent `eval_big` / `readBig` calls could mix
+  each other's data, a chunk boundary could split an emoji, and a short chunk
+  returned truncated output as success.
+- CLI output over 64 KB was cut off when stdout was a pipe (macOS).
+- `click` / `hover` / `dblclick` timed out on elements outside the viewport; they
+  now scroll them into view first.
+- `poll`, `pollStable`, and `readBig` rejected expressions such as `a || b`.
+- Requests after the connection closed, and `waitForEvent` / `waitForResponse` /
+  `captureStream` during a close, waited for the full timeout instead of failing.
+- `--port` / `connect({ port })` could pick another instance's token, and discovery
+  preferred stale records left by crashed hosts.
+- `text=` selectors matched wrapper elements; `toHaveText` / `toHaveValue` with a
+  `/g` or `/y` RegExp alternated between pass and fail; `type()` threw on numbers;
+  locator waits overran their timeout on a stalled host; `drag` could leave the mouse
+  pressed; `getByTestId` broke on quotes; `press()` sent the key as `code`.
+- Capture script: reused XHRs emitted duplicate `net` events, subclasses of
+  `WebSocket` / `EventSource` lost their methods, and streaming fetch responses were
+  buffered without bound.
+- `shot_stream` counted frames whose PNG failed to write; `stop()` now cancels active
+  streams and waits for in-flight captures.
+- Windows screenshots copy pixels by row and run at most two captures at once.
+
+### Security
+
+- The session token comes from the OS CSPRNG and is compared in constant time; a
+  connection is closed after 3 failed auth attempts or 5 s without authenticating.
+- Before auth, a line over 4 KB is parsed only if it carries the valid session
+  token (checked without parsing); any other oversized unauthenticated line closes
+  the connection. JSON nested deeper than 64 levels is rejected before parsing
+  (previously a stack overflow could crash the host).
+- Discovery files are created `0600` atomically, with no world-readable window, and
+  `stop()` no longer deletes a discovery file another instance has overwritten.
+
 ## [0.6.0] - 2026-07-21
 
 ### Added

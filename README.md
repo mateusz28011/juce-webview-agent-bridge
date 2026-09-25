@@ -195,6 +195,13 @@ sink-frame format, and discovery details are in [docs/protocol.md](docs/protocol
 - Native screenshots require macOS 14+ or Windows 11 and a compositor-capturable,
   non-minimized window. macOS permission/signing setup is in
   [docs/screen-recording.md](docs/screen-recording.md). Linux capture is a TODO.
+- **`shot_stream`** (frame-rate capture) is **macOS 14+ only** — it needs a
+  persistent `SCStream`, which the Windows/Linux screenshot backends don't have.
+  On other platforms it isn't advertised in `hello.ops` and replies
+  `SCREENSHOT_UNAVAILABLE`.
+- **`shot`/`shot_stream` write to client-supplied paths.** The authenticated
+  client can write PNGs anywhere the host process can write — loopback + token
+  is the trust boundary, not the path.
 - **Synthetic input** dispatched from JS has `isTrusted === false`, so APIs gated
   behind a user gesture (file pickers, some clipboard/fullscreen) are out of reach.
 - **eval errors** are only reported on WKWebView; on WebView2 a failed eval looks

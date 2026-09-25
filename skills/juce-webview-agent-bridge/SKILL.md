@@ -26,10 +26,13 @@ The client auto-discovers port + session token from `~/.web_agent_bridge.json` (
 - `fill <selector> <value>` — React-safe value set + input/change events.
 - `capture on|off` — toggle request+response bodies/headers, WebSocket/SSE frames, and beacon payloads on the network stream.
 - `backlog` — dump the page ring buffer (events from before you connected).
-- `logs` — live stream of console + errors + network (Ctrl-C to stop); `net` events carry `data.kind` ∈ `fetch`/`xhr`/`ws`/`sse`/`beacon`/`timing`.
+- `logs [--backlog]` — live stream of console + errors + network (Ctrl-C to stop); `net` events carry `data.kind` ∈ `fetch`/`xhr`/`ws`/`sse`/`beacon`/`timing`. `--backlog` dumps the buffered history first, before streaming live.
 - `shot [out.png] [selector]` — native compositor screenshot (macOS/Windows); a selector crops to that element's rect (much smaller PNG / fewer tokens). Prints the path.
 - `layerdebug on|off` — WebKit compositing debug overlays (layer borders + repaint counters) on the live WKWebView via WKPreferences SPI (macOS only). The overlays render into the window, so `shot` captures them — attribute repaints without a Web Inspector session. Turn OFF before any pixel-comparison capture (the overlays are pixels too), and keep the page still (pause app animations/transport) or churn pollutes every counter.
 - `layertree` — dump the WKWebView's remote CALayer tree as text (`_caLayerTreeAsText` SPI, macOS only): a programmatic compositing-layer census, no screenshot needed. Limits: geometry only — repaint COUNTS are drawn web-process-side into the backing, so per-layer repaint attribution still needs `layerdebug on` + `shot`.
+- `instances` — list running bridge instances (port, label, process name, pid) without connecting to any of them; useful when several app copies/plugin instances are running at once and you need to pick one with `--port`.
+
+A CLI command that fails (no matching element, no pong, an op reply with `ok:false`, …) exits **non-zero** — check the exit code in scripts instead of assuming success from the command having run.
 
 ## Playwright-style client (e2e.mjs)
 

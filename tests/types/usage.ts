@@ -1,7 +1,10 @@
 import {
+  BridgeOpError,
   connect,
   expect,
   parseLayerTree,
+  type BridgeErrorCode,
+  type LayerBounds,
   type AriaNode,
   type Capabilities,
   type NetworkEventData,
@@ -36,7 +39,23 @@ async function exercisePublicTypes(page: Page): Promise<void> {
   const negotiated: BridgeCapabilities | null = page.caps;
   const hostModule: string = negotiated?.moduleVersion ?? 'unknown';
 
-  void [state, settled, response, tree, perf, caps.ops, hostModule,
+  // Large reads, frame capture, and the layer census.
+  const big: string = await page.readBig('JSON.stringify(window.state)', { chunk: 16000, timeoutMs: 5000 });
+  const stream = await page.captureStream({ fps: 30, durationMs: 500, clip: { x: 0, y: 0, w: 100, h: 50 } });
+  const firstFrame: { path: string; t: number; w: number; h: number } | undefined = stream.frames[0];
+  const frameCount: number = stream.count;
+  const layers: LayerBounds[] = parseLayerTree(await page.layerTree());
+
+  // Structured op errors: branch on the machine-readable code.
+  try { await page.screenshot(); } catch (e) {
+    if (e instanceof BridgeOpError) {
+      const code: BridgeErrorCode | string = e.code;
+      const details: Record<string, unknown> | undefined = e.details;
+      void [code, details];
+    }
+  }
+
+  void [state, settled, response, tree, perf, caps.ops, hostModule, big, stream.dir, firstFrame, frameCount, layers,
        CLIENT_PROTOCOL_VERSION, clientVersion(), parseLayerTree(''), DEFAULT_PORT, loadDiscovery()];
 }
 

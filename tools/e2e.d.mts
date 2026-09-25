@@ -2,7 +2,7 @@ import type { Socket } from 'node:net';
 import type { BridgeCapabilities } from './shared.mjs';
 export { BridgeOpError } from './shared.mjs';
 export type { BridgeError, BridgeErrorCode } from './shared.mjs';
-type ProtocolMessage = Record<string, any>;
+type ProtocolMessage = Record<string, unknown>;
 type LogFn = (message: string) => void;
 type TimeoutOptions = {
     timeout?: number;
@@ -138,6 +138,9 @@ export declare function fileLogger(file: string, { echo }?: {
     echo?: boolean;
 }): LogFn;
 export declare const PAGE_HELPERS: string;
+/** The persistent bridge connection behind a Page. Exposed as `page.session` for
+    advanced callers, but its shape is an implementation detail.
+    @internal */
 declare class Session {
     readonly sock: Socket;
     readonly token: string;
@@ -147,12 +150,26 @@ declare class Session {
     }>;
     private _id;
     readonly sinkListeners: Set<(event: SinkEvent<any>) => void>;
+    private readonly closeListeners;
+    /** Set once the socket errored or closed: every later request rejects with it. */
+    private closedError;
     constructor(sock: Socket, token: string);
+    /** True once the connection has errored or closed. */
+    get closed(): boolean;
     onSink(fn: (event: SinkEvent<any>) => void): () => void;
-    _emitSink(event: SinkEvent<any>): void;
-    _failAll(err: unknown): void;
+    /** Called once with the reason when the connection goes away (immediately if it
+        already has). Returns an unsubscribe fn. */
+    onClose(fn: (error: Error) => void): () => void;
+    private _emitSink;
+    private _failAll;
     request(obj: ProtocolMessage, { timeoutMs }?: RequestOptions): Promise<ProtocolMessage>;
     evalRaw<T = unknown>(code: string, opts?: RequestOptions): Promise<T>;
+    /** (Re-)inject the page-side helper bundle (window.__wae). */
+    injectHelpers(): Promise<void>;
+    /** Eval a snippet that needs window.__wae. A page reload wipes the helpers, so
+        when they are missing the snippet is not run; the bundle is re-injected and
+        the snippet retried once — no stale-helper failures after a navigation. */
+    evalWae<T = unknown>(code: string, opts?: RequestOptions): Promise<T>;
     close(): void;
 }
 export declare function connect({ host, port, token, timeout, interval, log, logFile, logEcho, backendTimeoutMs, activate }?: ConnectOptions): Promise<Page>;
@@ -174,12 +191,24 @@ export declare class Page {
         caps?: BridgeCapabilities | null;
     });
     locator(selector: string): Locator;
+    /** Locate by `data-testid`. The id is quoted as a CSS string, so quotes and
+        backslashes in it match literally. */
     getByTestId(id: string): Locator;
     /** Escape hatch: run arbitrary JS in the page and get the result (small results). */
     evaluate<T = unknown>(code: string, opts?: RequestOptions): Promise<T>;
-    /** Read a string-valued JS expression in <=chunk slices. WKWebView's
-        evaluateJavascript stalls on large (>~100KB) returns, so big values are
-        pulled in pieces. `expr` must evaluate to (or stringify to) a string. */
+    /** Read a large JS value as a string without tripping WKWebView's
+        evaluateJavascript stall on big (>~100KB) returns.
+  
+        Value contract (identical on both paths): `undefined`/`null` -> `''`; a string
+        is returned as-is; anything else is `JSON.stringify`-ed (a value that
+        stringifies to `undefined`, e.g. a function, -> `''`). `expr` is evaluated
+        once, as a parenthesized expression.
+  
+        Hosts advertising the `eval_big` op assemble the value host-side in one
+        request. Older hosts fall back to a client-side loop over page-side slices;
+        `chunk` (default 32000 UTF-16 units) sizes those slices and applies ONLY to
+        that fallback — `eval_big` picks its own. A slice never splits a surrogate
+        pair, so emoji survive either path intact. */
     readBig(expr: string, { chunk, timeoutMs }?: {
         chunk?: number;
         timeoutMs?: number;
@@ -207,7 +236,8 @@ export declare class Page {
         'frame' event (`data:{path,w,h}`) fires per captured frame during captureStream(). */
     on<T = unknown>(kind: 'console' | 'error' | 'net' | 'navigation' | 'frame' | '*', handler: (event: SinkEvent<T>) => void): () => void;
     /** Resolve with the first sink event of `kind` (optionally matching predicate),
-        or reject on timeout. predicate receives the raw event { kind, t, data }. */
+        or reject on timeout or when the bridge connection closes. predicate
+        receives the raw event { kind, t, data }. */
     waitForEvent<T = unknown>(kind: 'console' | 'error' | 'net' | 'navigation' | 'frame' | '*', predicate?: ((event: SinkEvent<T>) => boolean) | TimeoutOptions, { timeout }?: TimeoutOptions): Promise<SinkEvent<T>>;
     /** Resolve with the network event `data` for the first fetch/XHR whose URL
         contains `urlOrPredicate` (string) or for which predicate(data) is true.
@@ -276,7 +306,8 @@ export declare class Page {
         op (persistent SCStream; macOS-only for now). Runs for `durationMs` at ~`fps`,
         writing one PNG per frame. Returns the directory, frame count, and the collected
         frame descriptors; frames also arrive live as `frame` sink events
-        (`page.on('frame')`). `clip: {x,y,w,h}` (CSS px) crops to a UI region. */
+        (`page.on('frame')`). `clip: {x,y,w,h}` (CSS px) crops to a UI region.
+        Rejects if the bridge connection closes mid-capture. */
     captureStream({ fps, durationMs, clip, dir, timeout }?: {
         fps?: number;
         durationMs?: number;
@@ -302,15 +333,17 @@ export declare class Locator {
     /** Narrow to the i-th match (0-based); negative or null = last match. */
     nth(i: number): Locator;
     first(): Locator;
-    _probe(opts?: RequestOptions): Promise<LocatorProbe>;
+    /** One actionability probe round-trip. `scroll` first scrolls the element into
+        the viewport if needed (pointer actions hit-test viewport coordinates).
+        @internal */
+    _probe(opts?: RequestOptions & {
+        scroll?: boolean;
+    }): Promise<LocatorProbe>;
     count(): Promise<number>;
     isVisible(): Promise<boolean>;
     textContent(): Promise<string | null>;
     getAttribute(name: string): Promise<string | null>;
-    _waitStable({ needEnabled, force, timeout, what }: ActionOptions & {
-        needEnabled?: boolean;
-        what: string;
-    }): Promise<LocatorProbe>;
+    private _waitStable;
     click({ timeout, force }?: ActionOptions): Promise<void>;
     fill(value: string | number, { timeout, enter }?: FillOptions): Promise<void>;
     /** Hover the element centre (pointerover/mouseover) — opens hover menus/tooltips.
@@ -329,7 +362,7 @@ export declare class Locator {
     check({ timeout }?: TimeoutOptions): Promise<void>;
     /** Ensure a checkbox is unchecked (no-op if already). */
     uncheck({ timeout }?: TimeoutOptions): Promise<void>;
-    _setChecked(desired: boolean, timeout?: number): Promise<void>;
+    private _setChecked;
     /** Focus the element. */
     focus({ timeout }?: TimeoutOptions): Promise<void>;
     /** Structured accessibility snapshot rooted at this element (see Page.ariaSnapshot). */
@@ -344,7 +377,13 @@ export declare class Locator {
         attach its document move/up listeners (a React effect) after mousedown. */
     drag({ dx, dy, steps, settleMs, stepMs, pointer, timeout }?: DragOptions): Promise<void>;
     waitFor({ state, timeout }?: WaitForOptions): Promise<void>;
-    _waitUntil(pred: (probe: LocatorProbe) => boolean, timeout: number | undefined, what: string): Promise<LocatorProbe>;
+    /** Poll the probe until pred(probe) holds, or throw a descriptive timeout.
+        Each probe gets the time left (floored at PROBE_FLOOR_MS) as its request
+        timeout, so a stalled host cannot stretch the wait past `timeout`.
+        @internal */
+    _waitUntil(pred: (probe: LocatorProbe) => boolean, timeout: number | undefined, what: string, { scroll }?: {
+        scroll?: boolean;
+    }): Promise<LocatorProbe>;
 }
 export interface LocatorAssertionMatchers {
     toBeVisible(options?: TimeoutOptions): Promise<LocatorProbe>;

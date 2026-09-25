@@ -7,12 +7,16 @@ import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
-const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm';
+// Run npm through its JS entry (set by `npm test`) so Windows doesn't need to spawn
+// npm.cmd — Node refuses to spawn .cmd/.bat without a shell (EINVAL).
+const npm = (args, opts) => process.env.npm_execpath
+  ? execFileSync(process.execPath, [process.env.npm_execpath, ...args], opts)
+  : execFileSync(process.platform === 'win32' ? 'npm.cmd' : 'npm', args, { ...opts, shell: process.platform === 'win32' });
 
 test('packed npm client supports root/subpath imports and the canonical CLI name', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wab-package-'));
   try {
-    const packed = JSON.parse(execFileSync(npm, ['pack', '--json', '--pack-destination', dir], {
+    const packed = JSON.parse(npm(['pack', '--json', '--pack-destination', dir], {
       cwd: ROOT,
       encoding: 'utf8',
     }));
@@ -22,7 +26,7 @@ test('packed npm client supports root/subpath imports and the canonical CLI name
       assert.ok(paths.has(required), `${required} is included in the tarball`);
 
     fs.writeFileSync(path.join(dir, 'package.json'), '{"private":true,"type":"module"}\n');
-    execFileSync(npm, ['install', '--ignore-scripts', '--no-audit', '--no-fund', packed[0].filename], {
+    npm(['install', '--ignore-scripts', '--no-audit', '--no-fund', packed[0].filename], {
       cwd: dir,
       stdio: 'pipe',
     });

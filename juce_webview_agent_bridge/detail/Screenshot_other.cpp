@@ -33,11 +33,16 @@ void captureStreamAsync (juce::Component& comp,
                          int durationMs,
                          juce::Rectangle<int> viewportCrop,
                          std::function<void (juce::String, double, int, int)> onFrame,
-                         std::function<void (bool, int, juce::String)> onDone)
+                         std::function<void (bool, int, juce::String)> onDone,
+                         std::function<bool()> shouldStop)
 {
-    juce::ignoreUnused (comp, dir, fps, durationMs, viewportCrop, onFrame);
+    juce::ignoreUnused (comp, dir, fps, durationMs, viewportCrop, onFrame, shouldStop);
     onDone (false, 0, "frame-rate capture is not implemented on this platform");
 }
+
+bool streamCaptureOsSupported() { return true; }
+
+void waitForCaptureWorkers (int) {}
 
 } // namespace web_agent::detail
 
