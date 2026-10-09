@@ -1,14 +1,27 @@
 name: tests
 
+# macOS and Windows jobs run only when started by hand (workflow_dispatch) or
+# through release.yml (which calls this workflow from its own dispatch): the
+# matrices below drop them for push and pull_request, which stay Linux-only.
+# Start a full run with: gh workflow run tests.yml --ref <branch>
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
+      - 'LICENSE'
   pull_request:
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
+      - 'LICENSE'
+  workflow_dispatch:
   workflow_call:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -21,18 +34,12 @@ jobs:
     strategy:
       fail-fast: false # a failure on one cell must not cancel the others' signal
       matrix:
-        include:
-          # 22 = the engines floor, 24 = current LTS; windows/macos each get one
-          # Node-24 cell so the suite is proven cross-platform without tripling
-          # the matrix.
-          - os: ubuntu-latest
-            node: 22
-          - os: ubuntu-latest
-            node: 24
-          - os: windows-latest
-            node: 24
-          - os: macos-latest
-            node: 24
+        # 22 = the engines floor, 24 = current LTS; windows/macos each get one
+        # Node-24 cell (manual and release runs only) so the suite is proven
+        # cross-platform without tripling the matrix.
+        include: ${{ fromJSON((github.event_name == 'push' || github.event_name == 'pull_request')
+          && '[{"os":"ubuntu-latest","node":22},{"os":"ubuntu-latest","node":24}]'
+          || '[{"os":"ubuntu-latest","node":22},{"os":"ubuntu-latest","node":24},{"os":"windows-latest","node":24},{"os":"macos-latest","node":24}]') }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
@@ -47,7 +54,8 @@ jobs:
           git diff --exit-code -- tools/
           npm run test:types
 
-  # C++ bridge suite against a real loopback server, on all three platforms.
+  # C++ bridge suite against a real loopback server. Linux on push/PR; all three
+  # platforms on manual and release runs.
   # All required: the suite went green on Windows/Linux in CI run 2, so those
   # columns gate the build like macOS does (live-app usage on them is still
   # unverified — see README "Status" — but the suite itself must stay green).
@@ -57,7 +65,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-14, windows-latest, ubuntu-latest]
+        os: ${{ fromJSON((github.event_name == 'push' || github.event_name == 'pull_request')
+          && '["ubuntu-latest"]'
+          || '["macos-14","windows-latest","ubuntu-latest"]') }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 

@@ -42,10 +42,25 @@ cmake --build build/test
 ctest --test-dir build/test --output-on-failure
 ```
 
-Please run both before opening a PR. CI (`.github/workflows/tests.yml`) runs the
-JS suites on Node 22/24 and the C++ suite on macOS, Windows, and Linux — all
-required. (Live-app usage on Linux is still unverified — see the README's
+Please run both before opening a PR. On every push to `main` and every PR, CI
+(`.github/workflows/tests.yml`) runs the JS suites on Node 22/24 and the C++
+suite on Linux only; docs-only changes skip it. The macOS and Windows jobs are
+never started automatically — they run only when started by hand, and as part
+of a release. (Live-app usage on Linux is still unverified — see the README's
 **Status** table — but the suites gate every change.)
+
+### Running macOS and Windows CI by hand
+
+Run the full matrix (JS on Linux/macOS/Windows, C++ on macOS/Windows/Linux)
+against a branch, for example before a release or when touching platform code:
+
+```bash
+gh workflow run tests.yml --ref <branch>
+gh run watch                      # or: gh run list --workflow tests.yml
+```
+
+Or use **Actions → tests → Run workflow** in the GitHub UI. Don't re-run it in a
+loop; verify macOS/Windows locally first.
 
 ## Repo layout
 
@@ -69,7 +84,7 @@ table) is consumed by both bundled clients and by third parties. Additive change
 ## Releases (maintainer)
 
 Use the manual **release** workflow in GitHub Actions and choose `patch`, `minor`,
-or `major`. It calls the same complete test workflow used by PRs (including C++
+or `major`. It calls the same test workflow with the complete matrix (including C++
 on macOS, Windows, and Linux); only after every job passes does it bump all
 version sites, commit, tag, create the GitHub Release, and publish the matching
 `juce-webview-agent-bridge` package to npm. It also refuses to release if `main`
